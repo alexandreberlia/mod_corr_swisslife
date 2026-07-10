@@ -84,11 +84,9 @@ m statsmodels.tsa.statespace.sarimax import SARIMAX
 
 
 def compare_arma_vs_leading_indicator(
-    data,
+    data, p, q,
     target,
     leading_factor,
-    p,
-    q,
     lag=1
 ):
     """
