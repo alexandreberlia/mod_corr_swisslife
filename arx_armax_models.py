@@ -299,3 +299,23 @@ def best_model_with_leading_indicator(
     results = results.sort_values("AIC")
 
     return results
+
+def select_best_model_with_leading_indicator(
+    data,
+    target,
+    leading_factor,
+    max_ar=5,
+    max_ma=5,
+    lag=1
+):
+
+    results = best_model_with_leading_indicator(
+        data=data,
+        target=target,
+        leading_factor=leading_factor,
+        max_ar=max_ar,
+        max_ma=max_ma,
+        lag=lag
+    )
+
+    return results.iloc[0]
