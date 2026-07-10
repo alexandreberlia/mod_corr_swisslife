@@ -80,7 +80,7 @@ def predictive_gain(
         "AIC Gain": gain
     }
 
-m statsmodels.tsa.statespace.sarimax import SARIMAX
+from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 
 def compare_arma_vs_leading_indicator(
