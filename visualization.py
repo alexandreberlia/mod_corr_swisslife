@@ -702,3 +702,69 @@
     "#graph_expansion_recession_past_dynamic(17*3, 'GDP', threshold=0)"
    ]
   }
+   {
+   "cell_type": "code",
+   "execution_count": 157,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def plot_columns_with_threshold_and_extremes______________(number=2, window=104, threshold_small=0.5, threshold_big=0.7, decimal=3, svgal_window=75, polyorder=3):\n",
+    "    df_list = normalize_y_axis(number=number, window=window, threshold_small=threshold_small, threshold_big=threshold_big, decimal=decimal, svgal_window=svgal_window, polyorder=polyorder)\n",
+    "    extreme_values = extreme_values_of_all_dfs_threshold(number=number, window=window, threshold_small=threshold_small, threshold_big=threshold_big, decimal=decimal, svgal_window=svgal_window, polyorder=polyorder)\n",
+    "    x = 0\n",
+    "\n",
+    "    colors = ['blue', 'orange']\n",
+    "    dot_colors = ['blue', 'orange']\n",
+    "\n",
+    "    for df_item in df_list:\n",
+    "        [df_name_x, df_name_y], df = df_item\n",
+    "        if ('(GDP)' in df_name_x or '(GDP)' in df_name_y) and ('(Employment)' in df_name_x or '(Employment)' in df_name_y):\n",
+    "            x += 1\n",
+    "            title = f'{x}. {df_name_x} and {df_name_y} with Threshold Line and Extremes'\n",
+    "            print(title)\n",
+    "            \n",
+    "            plt.figure(figsize=(12, 6))\n",
+    "            plt.axhline(y=0, color='red', linestyle='--', label='Threshold = 0')\n",
+    "            \n",
+    "            for col_idx, col in enumerate(df.columns):\n",
+    "                color = colors[col_idx % len(colors)]\n",
+    "                plt.plot(df.index, df[col], label=f'{col}', color=color, linewidth=1.5)\n",
+    "\n",
+    "            dot_color_idx = 0\n",
+    "            for extremes in extreme_values:\n",
+    "                for extreme in extremes:\n",
+    "                    if df_name_x in extreme[5] or df_name_y in extreme[5]:\n",
+    "                        extreme_values_list = [extreme[3]]\n",
+    "                        extreme_dates_list = [extreme[4]]\n",
+    "\n",
+    "                        for extreme_date, extreme_value in zip(extreme_dates_list, extreme_values_list):\n",
+    "                            plt.scatter(extreme_date, extreme_value, color=dot_colors[dot_color_idx], edgecolor='black', zorder=5, label='Extreme Value' if col not in locals() else \"\")\n",
+    "                            locals()[col] = True\n",
+    "                            dot_color_idx = 1 - dot_color_idx\n",
+    "                \n",
+    "            plt.title(title)\n",
+    "            plt.xlabel('Date')\n",
+    "            plt.ylabel('Value')\n",
+    "            plt.legend()\n",
+    "            plt.show()\n",
+    "        else:\n",
+    "            continue\n",
+    "\n",
+    "#plot_columns_with_threshold_and_extremes(threshold_big=0, threshold_small=0)\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "##### Smooth the data"
+   ]
+  },
+  
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "##### Put all the pairs in a list"
+   ]
+  }
