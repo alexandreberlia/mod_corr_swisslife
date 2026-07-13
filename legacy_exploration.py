@@ -606,20 +606,7 @@
     "##### Smooth the data"
    ]
   },
-  {
-   "cell_type": "code",
-   "execution_count": 158,
-   "metadata": {},
-   "outputs": [],
-   "source": [
-    "def smooth_the_dataframe______________(df, svgal_window=75, polyorder=3):\n",
-    "    smoothed_df = pd.DataFrame(index=df.index)\n",
-    "    for col in df.columns:\n",
-    "        smoothed_values = savgol_filter(df[col].values, svgal_window, polyorder)\n",
-    "        smoothed_df[col] = smoothed_values\n",
-    "    return smoothed_df"
-   ]
-  },
+  
   {
    "cell_type": "markdown",
    "metadata": {},
