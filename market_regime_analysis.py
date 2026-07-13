@@ -2842,3 +2842,30 @@
     "#past_trimesters_dynamic(3*17, 'GDP')"
    ]
   }
+{
+   "cell_type": "code",
+   "execution_count": 154,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def normalize_y_axis_threshold______________(svgal_window=75, polyorder=3, number=1, window=104, threshold_small=0.5, threshold_big=0.7, decimal=3):\n",
+    "    l = list_of_global_all_corr_parametrized(number=number, window=window, threshold_small=threshold_small, threshold_big=threshold_big, decimal=decimal)\n",
+    "    smoothed_df = smooth_dataframe(svgal_window=svgal_window, polyorder=polyorder, number=number, window=window, threshold_small=threshold_small, threshold_big=threshold_big, decimal=decimal)\n",
+    "    results = []\n",
+    "    for i in range(len(dict_of_df)):\n",
+    "        for j in range(len(dict_of_df)):\n",
+    "            dfx_name = f'df{i+1}'\n",
+    "            dfy_name = f'df{j+1}'\n",
+    "            if dfx_name in globals() and dfy_name in globals():\n",
+    "                dfx, dfy = smoothed_df[i], smoothed_df[j]\n",
+    "                for x in range(len(l)):\n",
+    "                    for y in range(len(dfx.columns)):\n",
+    "                        for z in range(len(dfy.columns)):\n",
+    "                            if (l[x][0] == dfx.columns[y]) and (l[x][1] == dfy.columns[z]):\n",
+    "                                normalized_df = normalize_columns(dfy, dfx, dfx.columns[y], dfy.columns[z])\n",
+    "                                results.append(([dfx.columns[y], dfy.columns[z]], normalized_df))\n",
+    "    return results\n",
+    "\n",
+    "#normalize_y_axis_threshold()"
+        ]
+  }
