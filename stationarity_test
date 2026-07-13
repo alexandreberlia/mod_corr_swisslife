@@ -1,5 +1,4 @@
 from statsmodels.tsa.stattools import adfuller, kpss
-convert_to_weeks()
 
 def integration_order(series):
 
