@@ -768,3 +768,48 @@
     "##### Put all the pairs in a list"
    ]
   }
+   {
+   "cell_type": "code",
+   "execution_count": 162,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def process_and_plot_pairs______________(pair_dataframes, svgal_window=300, polyorder=2):\n",
+    "    for idx, (df_pair1, df_pair2) in enumerate(pair_dataframes):\n",
+    "        smoothed_df1 = smooth_the_dataframe(df_pair1, svgal_window, polyorder)\n",
+    "        smoothed_df2 = smooth_the_dataframe(df_pair2, svgal_window, polyorder)\n",
+    "        normalized_df1, normalized_df2 = normalize_columns(smoothed_df1, smoothed_df2)\n",
+    "        \n",
+    "        # Find the overlapping date range\n",
+    "        common_index = normalized_df1.index.intersection(normalized_df2.index)\n",
+    "        normalized_df1 = normalized_df1.loc[common_index]\n",
+    "        normalized_df2 = normalized_df2.loc[common_index]\n",
+    "        \n",
+    "        # Calculate the median\n",
+    "        median_df1 = normalized_df1.median().median()\n",
+    "        median_df2 = normalized_df2.median().median()\n",
+    "\n",
+    "        # Plot the data\n",
+    "        plt.figure(figsize=(10, 6))\n",
+    "        plt.plot(normalized_df1.index, normalized_df1[normalized_df1.columns[0]], label=normalized_df1.columns[0])\n",
+    "        if len(normalized_df1.columns) > 1:\n",
+    "            plt.plot(normalized_df1.index, normalized_df1[normalized_df1.columns[1]], label=normalized_df1.columns[1])\n",
+    "        plt.plot(normalized_df2.index, normalized_df2[normalized_df2.columns[0]], label=normalized_df2.columns[0])\n",
+    "        if len(normalized_df2.columns) > 1:\n",
+    "            plt.plot(normalized_df2.index, normalized_df2[normalized_df2.columns[1]], label=normalized_df2.columns[1])\n",
+    "\n",
+    "        # Plot median lines\n",
+    "        plt.axhline(y=median_df1, color='blue', linestyle='--', label=f'Median {normalized_df1.columns[0]}')\n",
+    "        plt.axhline(y=median_df2, color='green', linestyle='--', label=f'Median {normalized_df2.columns[0]}')\n",
+    "\n",
+    "        plt.legend()\n",
+    "        plt.xlabel('Date')\n",
+    "        plt.ylabel('Normalized Values')\n",
+    "        plt.title(f'Normalized and Smoothed Plot: Pair {idx + 1}')\n",
+    "        plt.show()\n",
+    "\n",
+    "#process_and_plot_pairs(create_pair_dataframes(put_pairs_in_list(GDP_df, Employment_df)))"
+   ]
+  }
+
+
