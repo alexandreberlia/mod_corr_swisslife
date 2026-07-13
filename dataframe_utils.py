@@ -132,3 +132,38 @@
     "#put_pairs_in_list(GDP_df, Employment_df)"
    ]
   }
+
+{
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "##### Create a sub dataframe for every variable in the pair"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 160,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def create_pair_dataframes______________(pair_list):\n",
+    "    pair_dfs = []\n",
+    "    for pair in pair_list:\n",
+    "        dates1_col, var1_col, dates2_col, var2_col = pair\n",
+    "        \n",
+    "        # Retrieve dataframes and columns from globals\n",
+    "        df1 = next((globals()[df] for df in globals() if isinstance(globals()[df], pd.DataFrame) and dates1_col in globals()[df].columns), None)\n",
+    "        df2 = next((globals()[df] for df in globals() if isinstance(globals()[df], pd.DataFrame) and dates2_col in globals()[df].columns), None)\n",
+    "        \n",
+    "        if df1 is not None and df2 is not None:\n",
+    "            # Create new dataframes for the pairs\n",
+    "            df_pair1 = df1[[dates1_col, var1_col]].set_index(dates1_col)\n",
+    "            df_pair2 = df2[[dates2_col, var2_col]].set_index(dates2_col)\n",
+    "            \n",
+    "            pair_dfs.append([df_pair1, df_pair2])\n",
+    "        \n",
+    "    return pair_dfs\n",
+    "\n",
+    "#create_pair_dataframes(put_pairs_in_list(GDP_df, Employment_df))"
+   ]
+  }
