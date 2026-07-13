@@ -271,3 +271,29 @@
     "#export_highest_lowest_to_xlsx(1)"
    ]
   }
+
+{
+   "cell_type": "code",
+   "execution_count": 144,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def retain_highest_relevance______________(std_limit, variable_to_apply_regression_on, coef_need = None, std_error = None, t_value = None, p_value = None):\n",
+    "    list_needed = []\n",
+    "    df = lin_regression_stats_model(std_limit = std_limit, variable_to_apply_regression_on=variable_to_apply_regression_on)\n",
+    "    for i in range(1, len(df.tables[1])):\n",
+    "        if coef_need is not None and abs(float(df.tables[1][i][1].data)) >= coef_need:\n",
+    "            list_needed.append(df.tables[1][i][0].data)\n",
+    "        if std_error is not None and abs(float(df.tables[1][i][2].data)) >= std_error:\n",
+    "            list_needed.append(df.tables[1][i][0].data)\n",
+    "        if t_value is not None and abs(float(df.tables[1][i][3].data)) >= t_value:\n",
+    "            list_needed.append(df.tables[1][i][0].data)\n",
+    "        if p_value is not None and abs(float(df.tables[1][i][4].data)) >= p_value:\n",
+    "            list_needed.append(df.tables[1][i][0].data)\n",
+    "    list_needed = list(set(list_needed))        \n",
+    "\n",
+    "    return list_needed\n",
+    "\n",
+    "#len(retain_highest_relevance(2, 'Adjusted Retail Sales Less Aut MoM (Details selling)', coef_need=0.2))"
+   ]
+  }
