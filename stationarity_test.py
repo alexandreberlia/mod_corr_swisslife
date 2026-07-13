@@ -1,6 +1,30 @@
 from statsmodels.tsa.stattools import adfuller, kpss
 convert_to_weeks()
+import pandas as pd
 
+excel_file = pd.ExcelFile("cleaned_macro_data.xlsx")
+
+dict_of_df = {}
+
+for sheet in excel_file.sheet_names:
+
+    temp_df = pd.read_excel(
+        excel_file,
+        sheet_name=sheet,
+        index_col=0
+    )
+
+    temp_df.index = pd.to_datetime(
+        temp_df.index
+    )
+
+    dict_of_df[sheet] = temp_df
+
+for i, (name, dataframe) in enumerate(
+    dict_of_df.items(),
+    start=1
+):
+    globals()[f"df{i}"] = dataframe
 def integration_order(series):
 
     series = pd.to_numeric(
