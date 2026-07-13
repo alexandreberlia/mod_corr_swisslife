@@ -2749,3 +2749,48 @@
     "#box_plot_in_alternations_sheet(\"Test fréquence code couleur microcycles\", save_plots = \"yes\")"
    ]
   }
+
+ {
+   "cell_type": "code",
+   "execution_count": 151,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def find_expansion_recession______________(df, name='GDP', threshold=0):\n",
+    "    all_periods = []\n",
+    "\n",
+    "    columns_names = [col for col in df.columns if name in col and pd.api.types.is_numeric_dtype(df[col])]\n",
+    "    for col in columns_names:\n",
+    "        periods = []\n",
+    "        above_threshold = df.iloc[0][col] > threshold\n",
+    "        current_period = [df.index[0], None, above_threshold]\n",
+    "\n",
+    "        for index, value in df[col].items():\n",
+    "            if value > threshold and not above_threshold:\n",
+    "                current_period[1] = index\n",
+    "                periods.append(current_period + [col])\n",
+    "                current_period = [index, None, True]\n",
+    "                above_threshold = True\n",
+    "            elif value < threshold and above_threshold:\n",
+    "                current_period[1] = index\n",
+    "                periods.append(current_period + [col])\n",
+    "                current_period = [index, None, False]\n",
+    "                above_threshold = False\n",
+    "\n",
+    "        if current_period[1] is None:\n",
+    "            current_period[1] = df.index[-1]\n",
+    "            periods.append(current_period + [col])\n",
+    "\n",
+    "        for period in periods:\n",
+    "            start_index, end_index, above_threshold, col_name = period\n",
+    "            period_data = df.loc[start_index:end_index]\n",
+    "            extreme_value = period_data[col_name].max() if above_threshold else period_data[col_name].min()\n",
+    "            period.extend([period_data, extreme_value])\n",
+    "\n",
+    "        all_periods.append(periods)\n",
+    "\n",
+    "    return all_periods\n",
+    "\n",
+    "#x = find_expansion_recession(GDP_df)"
+   ]
+  }
