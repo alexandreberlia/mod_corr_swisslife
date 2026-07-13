@@ -1,0 +1,50 @@
+{
+   "cell_type": "code",
+   "execution_count": 107,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def set_index_on_monthly_basis(index_name, smooth_index = 'no', indices_window = 500, indices_order = 5, save_excel = 'no', excel_name = 'index_data.xlsx', cell_width = 20):\n",
+    "    for i in range(len(dict_of_df)):\n",
+    "        df_name = f'df{i}'\n",
+    "        if df_name in globals():\n",
+    "            the_df = globals()[df_name]\n",
+    "            if index_name in the_df:\n",
+    "                index_df = the_df[[index_name]]\n",
+    "                index_df = index_df[index_name].pct_change()*100\n",
+    "                index_df_converted = index_df.to_frame(name=index_name).dropna()\n",
+    "                if smooth_index == 'yes':\n",
+    "                    smooth_index_values = savgol_filter(index_df_converted[index_name], indices_window, indices_order)\n",
+    "                    index_df_converted[index_name] = smooth_index_values\n",
+    "                index_df_resampled = index_df_converted.resample('MS').mean()\n",
+    "    if save_excel == 'yes':\n",
+    "        index_df_resampled.to_excel(f\"{excel_name}.xlsx\")\n",
+    "        wb = load_workbook(f\"{excel_name}.xlsx\")\n",
+    "\n",
+    "        # Adjust dimensions automatically\n",
+    "        adjust_dimensions(wb, max_column_width=cell_width)\n",
+    "\n",
+    "        # Save the workbook with the adjusted dimensions\n",
+    "        wb.save(f\"{excel_name}.xlsx\")\n",
+    "    return index_df_resampled\n",
+    "\n",
+    "#set_index_on_monthly_basis(index_name=\"S&P 500 (Stock Index)\", smooth_index='yes')"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 108,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def corr_between_indices_market_trend(index_name, smooth_index = 'no', indices_window = 500, indices_order = 5):\n",
+    "    index_df = set_index_on_monthly_basis(index_name=index_name, smooth_index=smooth_index, indices_window=indices_window, indices_order=indices_order)\n",
+    "    df = combine_cycles_and_stds_trend()\n",
+    "    merged_df = pd.merge(index_df, df, left_index=True, right_index=True, how='inner')\n",
+    "    correlation_matrix = merged_df.corr()\n",
+    "    correlation_with_index = correlation_matrix.loc[index_name, [df.columns[0], df.columns[1]]]\n",
+    "    return correlation_with_index\n",
+    "\n",
+    "#corr_between_indices_market_trend(\"NASDAQ (Stock Index)\", smooth_index = 'yes', indices_window = 500, indices_order = 5)"
+   ]
+  }
