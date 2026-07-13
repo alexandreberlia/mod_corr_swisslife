@@ -1,35 +1,5 @@
 
-  {
-   "cell_type": "code",
-   "execution_count": 145,
-   "metadata": {},
-   "outputs": [],
-   "source": [
-    "def lin_regression_sklearn______________(std_limit, variable_to_apply_regression_on):\n",
-    "    original_df = find_dates_above_below_stds(std_limit=std_limit)\n",
-    "    linear_regression_df = filter_the_original_df(original_df)\n",
-    "    Y = linear_regression_df[variable_to_apply_regression_on] \n",
-    "    variables_list = []\n",
-    "    for i in range(len(linear_regression_df.columns)):\n",
-    "        if variable_to_apply_regression_on == linear_regression_df.columns[i]:\n",
-    "            continue\n",
-    "        else:\n",
-    "            variables_list.append(linear_regression_df.columns[i])\n",
-    "    X = linear_regression_df[variables_list]  \n",
-    "    X_train, X_test, Y_train, Y_test = train_test_split(X, Y, test_size=0.2, random_state=0)\n",
-    "    model = LinearRegression()\n",
-    "    model.fit(X_train, Y_train)\n",
-    "    Y_pred = model.predict(X_test)\n",
-    "    mse = mean_squared_error(Y_test, Y_pred)\n",
-    "    r2 = r2_score(Y_test, Y_pred)\n",
-    "    print(f\"Mean Squared Error: {mse}\")\n",
-    "    print(f\"R^2 Score: {r2}\")\n",
-    "    print(\"Coefficients:\", model.coef_)\n",
-    "    print(\"Intercept:\", model.intercept_)\n",
-    "\n",
-    "#lin_regression_sklearn(2, variable_to_apply_regression_on='Adjusted Retail Sales Less Aut MoM (Details selling)')"
-   ]
-  },
+ 
   {
    "cell_type": "markdown",
    "metadata": {},
