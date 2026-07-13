@@ -631,16 +631,7 @@
    "metadata": {},
    "outputs": [],
    "source": [
-    "def convert_to_weeks():\n",
-    "    global_vars = globals()\n",
-    "    for key, df in dict_of_df.items():\n",
-    "        df_weekly = df.resample('W').mean()\n",
-    "        df_filled = (df_weekly.interpolate(method='linear')).round(2)\n",
-    "        dict_of_df[key] = df_filled \n",
-    "\n",
-    "        global_vars[key] = df_filled\n",
-    "\n",
-    "convert_to_weeks()"
+    
    ]
   },
 
