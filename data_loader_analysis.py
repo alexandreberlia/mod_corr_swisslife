@@ -105,3 +105,23 @@ def convert_to_weeks():
 convert_to_weeks()
 
 print(f"{len(dict_of_df)} dataframes créés")
+
+mapping = {}
+
+for i in range(0, len(df_original.columns) - 1, 2):
+
+    date_col = df_original.columns[i]
+    value_col = df_original.columns[i + 1]
+
+    if str(date_col).startswith("Dates for "):
+        mapping[f"Unnamed: {i+1}"] = value_col
+
+print(mapping)
+for name in dict_of_df:
+
+    dict_of_df[name].rename(
+        columns=mapping,
+        inplace=True
+    )
+
+    globals()[name] = dict_of_df[name]
