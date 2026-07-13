@@ -114,3 +114,21 @@
     "#create_sub_dataframe_further_analysis()"
    ]
   }
+ {
+   "cell_type": "code",
+   "execution_count": 159,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def put_pairs_in_list______________(dfx, dfy):\n",
+    "    indexes_list = []\n",
+    "    for i in range(0, len(dfx.columns), 2):\n",
+    "        for j in range(0, len(dfy.columns), 2):\n",
+    "            if \"Dates for\" in dfx.columns[i] and \"Dates for\" in dfy.columns[j]:\n",
+    "                pairs = [dfx.columns[i], dfx.columns[i+1], dfy.columns[j], dfy.columns[j+1]]\n",
+    "                indexes_list.append(pairs)\n",
+    "    return indexes_list\n",
+    "\n",
+    "#put_pairs_in_list(GDP_df, Employment_df)"
+   ]
+  }
