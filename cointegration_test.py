@@ -82,7 +82,7 @@ def cointegration_report(
         )
 
         wb.save(
-            f"{excel_name}.xlsx"
+            f"{excel_name}.xlsx")
 
 def significant_cointegrated_pairs(
         significance_level=0.05):
@@ -164,6 +164,5 @@ def cointegration_I1_only(
     return pd.DataFrame(results).sort_values(
         by="p-value"
     )
-        )
 
     return results_df
