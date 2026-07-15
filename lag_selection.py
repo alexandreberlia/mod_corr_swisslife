@@ -1,7 +1,6 @@
 from statsmodels.tsa.vector_ar.var_model import VAR
 import pandas as pd
 
-
 def select_optimal_lag(
         data: pd.DataFrame,
         block_name: str = "Unnamed",
@@ -30,12 +29,6 @@ def select_optimal_lag(
     )
 
     results = pd.DataFrame({
-        "Criterion": [
-            "AIC",
-            "BIC",
-            "HQIC",
-            "FPE"
-        ],
         f"Optimal Lag for {block_name}": [
             lag_selection.aic,
             lag_selection.bic,
@@ -45,3 +38,18 @@ def select_optimal_lag(
     })
 
     return results
+
+criterion=pd.DataFrame({"Criterion": [
+            "AIC",
+            "BIC",
+            "HQIC",
+            "FPE"
+        ]})
+
+def optimal_lag():
+        optimal_lag.df=pd.concat([criterion,select_optimal_lag(build_growth_block(dict_of_df), block_name="Growth Block"),
+                                 select_optimal_lag(build_inflation_block(dict_of_df), block_name="Inflation Block"),
+                                 select_optimal_lag(build_employment_block(dict_of_df), block_name="Employment Block"),
+                                 select_optimal_lag(build_macro_policy_block(dict_of_df), block_name="Macro Policy Block"),
+                                 select_optimal_lag(build_macro_core_block(dict_of_df), block_name="Macro Core Block")],axis=1)
+        return optimal_lag.df
