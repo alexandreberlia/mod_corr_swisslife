@@ -127,3 +127,34 @@ def estimate_all_vecm_blocks(dict_of_df):
     )
 
     return models
+
+import pandas as pd
+
+
+def display_gamma_matrices(results):
+    """
+    Display all short-run gamma matrices.
+    """
+
+    n = len(results.names)
+
+    print()
+    print("=" * 100)
+    print("SHORT-RUN GAMMA MATRICES")
+    print("=" * 100)
+
+    for i in range(results.k_ar - 1):
+
+        start = i * n
+        end = (i + 1) * n
+
+        gamma_i = pd.DataFrame(
+            results.gamma[:, start:end],
+            index=results.names,
+            columns=results.names
+        )
+
+        print()
+        print(f"Gamma_{i+1}")
+        print("-" * 100)
+        print(gamma_i)
