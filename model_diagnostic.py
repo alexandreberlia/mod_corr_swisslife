@@ -3,13 +3,6 @@ import numpy as np
 
 
 def check_stability(model):
-    """
-    Check system stability.
-
-    Returns
-    -------
-    pd.DataFrame
-    """
 
     roots = model.roots
 
@@ -18,12 +11,12 @@ def check_stability(model):
         "Modulus": np.abs(roots)
     })
 
-    stability_df["Inside Unit Circle"] = (
-        stability_df["Modulus"] < 1
+    stability_df["Stable Root"] = (
+        stability_df["Modulus"] > 1
     )
 
     stability = (
-        stability_df["Inside Unit Circle"]
+        stability_df["Stable Root"]
         .all()
     )
 
@@ -46,7 +39,7 @@ def portmanteau_test(
         nlags=None):
     if nlags is None:
         nlags=model.k_ar+10
-                
+
     results = model.test_whiteness(
         nlags=nlags
     )
@@ -79,15 +72,14 @@ def portmanteau_test(
 
     return results
 
-
 def lm_test(
-        model,
-        nlags=None):
+    lmodel,
+    nlags=None):
     if nlags is None:
-        nlags=model.k_ar+10
+            nlags=model.k_ar+10
 
     results = model.test_serial_correlation(
-        lags=nlags
+    lags=nlags
     )
 
     print()
@@ -98,7 +90,6 @@ def lm_test(
     print(results)
 
     return results
-
 
 def homoskedasticity_test(model):
     """
@@ -131,13 +122,11 @@ def heteroskedasticity_test(model):
     print(results)
 
     return results
-
 def diagnostic_report(
         model,
         nlags=None):
     if nlags is None:
         nlags=model.k_ar+10
-
 
     print()
     print("=" * 100)
