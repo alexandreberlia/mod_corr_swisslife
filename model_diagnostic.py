@@ -11,12 +11,12 @@ def check_stability(model):
         "Modulus": np.abs(roots)
     })
 
-    stability_df["Inside Unit Circle"] = (
-        stability_df["Modulus"] < 1
+    stability_df["Stable Root"] = (
+        stability_df["Modulus"] > 1
     )
 
     stability = (
-        stability_df["Inside Unit Circle"]
+        stability_df["Stable Root"]
         .all()
     )
 
