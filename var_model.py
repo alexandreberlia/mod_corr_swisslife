@@ -8,29 +8,6 @@ def estimate_var(
         block_name="Unnamed Block",
         deterministic="c"
 ):
-    """
-    Estimate a VAR(p) model.
-
-    Parameters
-    ----------
-    data : pd.DataFrame
-        Variables du système.
-
-    lag : int
-        Nombre de retards.
-
-    block_name : str
-        Nom du bloc économique.
-
-    deterministic : str
-        n  : aucune constante
-        c  : constante
-        ct : constante + trend
-
-    Returns
-    -------
-    VARResults
-    """
 
     data = data.dropna()
 
@@ -55,17 +32,10 @@ def estimate_var(
 
 
 def var_coefficients(results):
-    """
-    Retourne les coefficients VAR sous forme DataFrame.
-    """
-
     return results.params
 
 
 def display_var_equations(results):
-    """
-    Affiche les équations estimées.
-    """
 
     print()
     print("=" * 100)
@@ -85,9 +55,6 @@ def export_var_coefficients(
         results,
         excel_name="VAR_Coefficients"
 ):
-    """
-    Export des coefficients.
-    """
 
     coeffs = results.params
 
@@ -99,10 +66,6 @@ def export_var_coefficients(
 
 
 def estimate_all_blocks(dict_of_df):
-    """
-    Estime tous les blocs économiques.
-    """
-
     models = {}
 
     growth_block = build_growth_block(dict_of_df)
