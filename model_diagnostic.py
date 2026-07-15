@@ -43,10 +43,9 @@ def check_stability(model):
 
 def portmanteau_test(
         model,
-        nlags=12):
-    """
-    Residual autocorrelation test.
-    """
+        nlags=None):
+            if nlags is None:
+                nlags=model.k_ar+10
 
     results = model.test_whiteness(
         nlags=nlags
