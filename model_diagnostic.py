@@ -82,10 +82,9 @@ def portmanteau_test(
 
 def lm_test(
         model,
-        nlags=12):
-    """
-    Breusch-Godfrey LM test.
-    """
+        nlags=None):
+    if nlags is None:
+        nlags=model.k_ar+10
 
     results = model.test_serial_correlation(
         lags=nlags
@@ -135,10 +134,10 @@ def heteroskedasticity_test(model):
 
 def diagnostic_report(
         model,
-        nlags=12):
-    """
-    Complete diagnostic report.
-    """
+        nlags=None):
+    if nlags is None:
+        nlags=model.k_ar+10
+
 
     print()
     print("=" * 100)
