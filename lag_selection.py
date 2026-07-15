@@ -4,36 +4,10 @@ import pandas as pd
 
 def select_optimal_lag(
         data: pd.DataFrame,
+        block_name: str = "Unnamed",
         maxlags: int = 15,
         deterministic: str = "c"
     ) -> pd.DataFrame:
-    """
-    Sélectionne le nombre optimal de retards d'un modèle VAR/VECM.
-
-    Parameters
-    ----------
-    data : pd.DataFrame
-        Séries temporelles utilisées dans le système.
-
-    maxlags : int, default=15
-        Nombre maximal de retards testés.
-
-    deterministic : str, default="c"
-        Composantes déterministes :
-        - "n"  : aucune constante ni tendance
-        - "c"  : constante
-        - "ct" : constante + tendance
-        - "ctt": constante + tendance quadratique
-
-    Returns
-    -------
-    pd.DataFrame
-        Tableau contenant le retard optimal selon :
-        - AIC
-        - BIC
-        - HQIC
-        - FPE
-    """
 
     if not isinstance(data, pd.DataFrame):
         raise TypeError(
@@ -62,7 +36,7 @@ def select_optimal_lag(
             "HQIC",
             "FPE"
         ],
-        "Optimal Lag": [
+        f"Optimal Lag for {block_name}": [
             lag_selection.aic,
             lag_selection.bic,
             lag_selection.hqic,
