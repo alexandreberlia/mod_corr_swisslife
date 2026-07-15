@@ -73,7 +73,6 @@ def portmanteau_test(
     return results
 
 def lm_test(
-    l
     model,
     nlags=None):
     if nlags is None:
