@@ -55,7 +55,7 @@ criterion=pd.DataFrame({"Criterion": [
             "FPE"
         ]})
 
-def optimal_lag():
+def optimal_lag(dict_of_df):
         optimal_lag.df=pd.concat([criterion,select_optimal_lag(build_growth_block(dict_of_df), block_name="Growth Block"),
                                  select_optimal_lag(build_inflation_block(dict_of_df), block_name="Inflation Block"),
                                  select_optimal_lag(build_employment_block(dict_of_df), block_name="Employment Block"),
