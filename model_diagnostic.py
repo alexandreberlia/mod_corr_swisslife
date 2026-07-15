@@ -36,10 +36,9 @@ def check_stability(model):
 
 def portmanteau_test(
         model,
-        nlags=12):
-    """
-    Residual autocorrelation test.
-    """
+        nlags=None):
+    if nlags is None:
+        nlags=model.k_ar+10
 
     results = model.test_whiteness(
         nlags=nlags
@@ -73,15 +72,15 @@ def portmanteau_test(
 
     return results
 
-          def lm_test(
-        model,
-        nlags=12):
-    """
-    Breusch-Godfrey LM test.
-    """
+def lm_test(
+    l
+    model,
+    nlags=None):
+    if nlags is None:
+            nlags=model.k_ar+10
 
     results = model.test_serial_correlation(
-        lags=nlags
+    lags=nlags
     )
 
     print()
@@ -126,10 +125,9 @@ def heteroskedasticity_test(model):
     return results
 def diagnostic_report(
         model,
-        nlags=12):
-    """
-    Complete diagnostic report.
-    """
+        nlags=None):
+    if nlags is None:
+        nlags=model.k_ar+10
 
     print()
     print("=" * 100)
