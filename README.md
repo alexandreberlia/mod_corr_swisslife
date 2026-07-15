@@ -235,3 +235,349 @@ constitue souvent un compromis intéressant.
 L'objectif final est d'obtenir une compréhension dynamique des relations
 macroéconomiques et de produire des scénarios cohérents de prévision.
 """
+
+"""
+INTERPRÉTATION ET UTILISATION DES MODÈLES VAR / VECM
+===================================================
+
+Cette section décrit les principales fonctions du module, leur utilité
+économique et la manière d'interpréter leurs résultats.
+
+──────────────────────────────────────────────────────────────────────────────
+1. SÉLECTION DU NOMBRE OPTIMAL DE RETARDS
+──────────────────────────────────────────────────────────────────────────────
+
+Fonction :
+
+    optimal_lag()
+
+Utilisation :
+
+    optimal_lag(dict_of_df)
+
+Objectif :
+
+    Déterminer le nombre optimal de retards du système.
+
+Sortie :
+
+    Criterion           Optimal Lag
+
+    AIC                    15
+    BIC                    10
+    HQIC                   12
+    FPE                    15
+
+──────────────────────────────────────────────────────────────────────────────
+2. ESTIMATION D'UN VAR
+──────────────────────────────────────────────────────────────────────────────
+
+Fonction :
+
+    estimate_var()
+
+Utilisation :
+
+    var_model = estimate_var(
+        data=macro_core,
+        lag=...,
+        block_name="Macro Core Block"
+    )
+
+Objectif :
+
+    Modéliser les interactions dynamiques entre plusieurs variables
+    stationnaires.
+
+Le modèle estimé est :
+
+    Yt = A1Yt-1 + A2Yt-2 + ... + ApYt-p + εt
+
+Chaque variable du système dépend :
+
+    - de ses propres retards
+    - des retards des autres variables du système
+
+Utilisations :
+
+    - prévisions
+    - causalité de Granger
+    - réponses impulsionnelles
+    - décomposition de variance
+
+──────────────────────────────────────────────────────────────────────────────
+3. COEFFICIENTS DU VAR
+──────────────────────────────────────────────────────────────────────────────
+
+Fonction :
+
+    display_var_equations()
+
+Utilisation :
+
+    display_var_equations(var_model)
+
+Objectif :
+
+    Visualiser les équations estimées.
+
+Exemple :
+
+    GDP(t)
+
+    =
+    0.72 GDP(t-1)
+    -0.14 Inflation(t-1)
+    +0.06 Unemployment(t-1)
+
+Interprétation :
+
+    Une augmentation de l'inflation à la période précédente est
+    associée à une baisse de la croissance du PIB à la période actuelle.
+
+Les coefficients décrivent :
+
+    uniquement les relations de court et moyen terme.
+
+──────────────────────────────────────────────────────────────────────────────
+4. MODELE VECM
+──────────────────────────────────────────────────────────────────────────────
+
+Le modèle estimé est :
+
+    ΔYt
+    =
+    αβ'Yt-1
+    +
+    Γ1ΔYt-1
+    +
+    ...
+    +
+    ΓpΔYt-p
+    +
+    εt
+
+──────────────────────────────────────────────────────────────────────────────
+5. TEST DE JOHANSEN
+──────────────────────────────────────────────────────────────────────────────
+
+Fonction :
+
+    johansen_summary()
+
+Utilisation :
+
+    johansen_summary(
+        consumer_block,
+        k_ar_diff=5
+    )
+
+Objectif :
+
+    Déterminer le nombre de relations de cointégration.
+
+Sortie :
+
+    Rank      Trace Statistic
+
+    0             56.2
+    1             22.4
+    2              7.1
+
+Interprétation :
+
+    Rank = 0
+        aucune relation de long terme
+
+    Rank = 1
+        une relation de long terme
+
+    Rank = 2
+        deux relations de long terme
+
+Le rang estimé est utilisé dans :
+
+    estimate_vecm()
+
+sous la forme :
+
+    coint_rank
+
+──────────────────────────────────────────────────────────────────────────────
+6. ESTIMATION D'UN VECM
+──────────────────────────────────────────────────────────────────────────────
+
+Fonction :
+
+    estimate_vecm()
+
+Utilisation :
+
+    vecm_model = estimate_vecm(
+        data=consumer_block,
+        k_ar_diff=...,
+        coint_rank=1,
+        block_name="Consumer Block"
+    )
+
+Objectif :
+
+    Modéliser simultanément :
+
+        - les ajustements de court terme
+        - les relations de long terme
+
+Entre des variables non stationnaires.
+
+──────────────────────────────────────────────────────────────────────────────
+7. RELATION DE COINTÉGRATION (BETA)
+──────────────────────────────────────────────────────────────────────────────
+
+Fonction :
+
+    display_cointegration_relation()
+
+Utilisation :
+
+    display_cointegration_relation(vecm_model)
+
+Objectif :
+
+    Afficher les vecteurs β.
+
+Exemple :
+
+    U-3 Unemployment                     1.000
+    Payrolls                             0.030
+    ADP                                 -0.013
+
+La relation estimée est :
+
+    Unemployment
+    +
+    0.030 Payrolls
+    -
+    0.013 ADP
+    =
+    0
+
+Interprétation :
+
+    Cette équation représente une relation d'équilibre de long terme.
+
+Elle ne décrit pas :
+
+    l'évolution d'une période à l'autre,
+
+mais :
+
+    la combinaison des variables vers laquelle le système tend
+    à revenir à long terme.
+
+──────────────────────────────────────────────────────────────────────────────
+8. TERMES DE CORRECTION D'ERREUR (ALPHA)
+──────────────────────────────────────────────────────────────────────────────
+
+Fonction :
+
+    display_error_correction_terms()
+
+Utilisation :
+
+    display_error_correction_terms(vecm_model)
+
+Objectif :
+
+    Identifier quelles variables corrigent les déséquilibres.
+
+Exemple :
+
+    Unemployment      -0.24
+    Payrolls           0.01
+    ADP               -0.05
+
+Interprétation :
+
+    Le chômage corrige environ 24 % du déséquilibre observé
+    à chaque période.
+
+Plus la valeur absolue du coefficient est élevée :
+
+    plus la variable participe à la correction de l'équilibre.
+
+Les coefficients α sont souvent les résultats les plus intéressants
+d'un VECM d'un point de vue économique.
+
+──────────────────────────────────────────────────────────────────────────────
+9. DYNAMIQUE DE COURT TERME (GAMMA)
+──────────────────────────────────────────────────────────────────────────────
+
+Fonction :
+
+    display_gamma_matrices()
+
+Utilisation :
+
+    display_gamma_matrices(vecm_model)
+
+Objectif :
+
+    Afficher les matrices Γ.
+
+Exemple :
+
+    Gamma_1
+
+                        GDP     CPI
+    GDP               0.42   -0.10
+    CPI               0.05    0.28
+
+Interprétation :
+
+    Les matrices Gamma décrivent les effets des variations passées
+    sur les variations présentes.
+
+Exemple :
+
+    Une hausse du PIB à la période précédente influence
+    positivement la variation actuelle du PIB.
+
+Les matrices Γ représentent :
+
+    la dynamique de court terme du système.
+
+──────────────────────────────────────────────────────────────────────────────
+10. RÉSUMÉ DE L'INTERPRÉTATION
+──────────────────────────────────────────────────────────────────────────────
+
+VAR :
+
+    A_i
+
+        → Effets dynamiques entre variables
+
+VECM :
+
+    β
+
+        → Équilibre de long terme
+
+    α
+
+        → Vitesse de retour vers l'équilibre
+
+    Γ
+
+        → Dynamique de court terme
+
+En pratique :
+
+    VAR :
+
+        "Comment les variables réagissent-elles les unes aux autres ?"
+
+    VECM :
+
+        "Comment les variables réagissent-elles les unes aux autres,
+        tout en respectant une relation économique de long terme ?"
+"""
