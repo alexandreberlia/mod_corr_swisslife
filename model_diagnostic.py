@@ -151,3 +151,49 @@ def diagnostic_report(
         "portmanteau": portmanteau,
         "normality": normality
     }
+
+from statsmodels.stats.diagnostic import acorr_ljungbox
+import pandas as pd
+
+
+def vecm_portmanteau_test(
+        vecm_results,
+        nlags=12):
+    """
+    Portmanteau / Ljung-Box test on VECM residuals.
+    """
+
+    residuals = pd.DataFrame(
+        vecm_results.resid,
+        columns=vecm_results.names
+    )
+
+    print()
+    print("=" * 100)
+    print("VECM PORTMANTEAU TEST")
+    print("=" * 100)
+
+    results = []
+
+    for column in residuals.columns:
+
+        test = acorr_ljungbox(
+            residuals[column],
+            lags=[nlags],
+            return_df=True
+        )
+
+        pvalue = test["lb_pvalue"].iloc[-1]
+
+        results.append({
+            "Variable": column,
+            "P-value": pvalue,
+            "Residual White Noise": pvalue > 0.05
+        })
+
+    results_df = pd.DataFrame(results)
+
+    print(results_df)
+
+    return results_df
+
