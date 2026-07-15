@@ -73,7 +73,7 @@ def portmanteau_test(
     return results
 
 def lm_test(
-    lmodel,
+    model,
     nlags=None):
     if nlags is None:
             nlags=model.k_ar+10

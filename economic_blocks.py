@@ -130,3 +130,38 @@ def build_employment_block(dict_of_df):
         ],
         axis=1
     ).dropna()
+
+import pandas as pd
+
+
+def build_consumer_block(dict_of_df):
+    """
+    Consumer Block
+
+    Consumer Confidence
+    Michigan Sentiment
+    Retail Sales
+    Personal Consumption
+    """
+
+    return pd.concat(
+        [
+            get_series(
+                "Conference Board Consumer Conf (Customer Trust)",
+                dict_of_df
+            ),
+            get_series(
+                "University of Michigan Consume (Customer Trust)",
+                dict_of_df
+            ),
+            get_series(
+                "Adjusted Retail Sales Less Aut YoY (Details selling)",
+                dict_of_df
+            ),
+            get_series(
+                "US Personal Consumption Expend % (Household)",
+                dict_of_df
+            )
+        ],
+        axis=1
+    ).dropna()

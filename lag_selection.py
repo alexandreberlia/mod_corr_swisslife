@@ -5,7 +5,7 @@ from economic_blocks import*
 def select_optimal_lag(
         data: pd.DataFrame,
         block_name: str = "Unnamed",
-        maxlags: int = 15,
+        maxlags: int = 30,
         deterministic: str = "c"
     ) -> pd.DataFrame:
 
