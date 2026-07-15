@@ -44,9 +44,9 @@ def check_stability(model):
 def portmanteau_test(
         model,
         nlags=None):
-            if nlags is None:
-                nlags=model.k_ar+10
-
+    if nlags is None:
+        nlags=model.k_ar+10
+                
     results = model.test_whiteness(
         nlags=nlags
     )
