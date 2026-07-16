@@ -135,9 +135,6 @@ import pandas as pd
 
 
 def display_gamma_matrices(results):
-    """
-    Display all short-run gamma matrices.
-    """
 
     n = len(results.names)
 
