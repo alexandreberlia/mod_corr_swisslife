@@ -4,7 +4,7 @@ from statsmodels.tsa.vector_ar.vecm import(VECM,select_order,select_coint_rank)
 
 def granger_vecm(
         results,
-        significance_level=0.05):
+        significance_level):
  
     gc = []
 
@@ -34,42 +34,37 @@ def granger_vecm(
 
             })
 
-    granger_df = pd.DataFrame(gc)
-
-    granger_df.sort_values("P-value")
+    granger_df=pd.DataFrame(gc)
+    significant=granger_df.sort_values("P-value",ascending=True)
+    return significant
 
 def display_vecm_granger(
         results,
-        significance_level=0.05):
-
-    granger = granger_vecm(
+        significance_level):
+    granger_vecm(
         results,
         significance_level
     )
-
-    significant = granger[
-        granger["Granger Causality"]
-    ]
 
     print()
     print("=" * 100)
     print("VECM GRANGER CAUSALITY")
     print("=" * 100)
 
-    display(significant)
-
     return significant
 
 
 def export_vecm_granger(
         results,
+        significance_level,
         excel_name="VECM_Granger"):
 
-    granger = granger_vecm(
-        results
+    granger_table=granger_vecm(
+        results,
+        significance_level
     )
 
-    granger.to_excel(
+    granger_table.to_excel(
         f"{excel_name}.xlsx",
         index=False
     )
@@ -78,13 +73,14 @@ def export_vecm_granger(
 
 
 def vecm_granger_matrix(
-        results):
+        results, significance_level):
 
-    granger = granger_vecm(
-        results
+    granger_table=granger_vecm(
+        results,
+        significance_level
     )
 
-    matrix = granger.pivot(
+    matrix = granger_table.pivot(
         index="Cause",
         columns="Effect",
         values="P-value"
