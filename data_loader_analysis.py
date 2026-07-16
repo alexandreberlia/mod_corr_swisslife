@@ -1,4 +1,7 @@
+from data_loader import df
 import pandas as pd
+
+df=df.copy()
 
 def convert_date_columns(df):
     for i in range(0, len(df.columns), 2):
