@@ -1,42 +1,23 @@
 import pandas as pd
-from scipy.stats import chi2
+from statmodels.tsa.vector_ar.vecm import(VECM,select_order,select_coint_rank)
 
 
 def granger_vecm(
         vecm_results,
         significance_level=0.05):
-
-    variables = vecm_results.names
-
-    gamma = vecm_results.gamma
-
-    n = len(variables)
-
+ 
     results = []
 
-    for causing_idx, causing in enumerate(variables):
+    for caused in consumer_vecm.names:
 
-        for caused_idx, caused in enumerate(variables):
+        for causing in consumer_vecm.names:
 
-            if causing == caused:
-                continue
+            if caused == causing:
+                    continue
 
-            statistic = 0
-
-            for lag in range(vecm_results.k_ar - 1):
-
-                column_index = causing_idx + lag * n
-
-                coefficient = gamma[
-                    caused_idx,
-                    column_index
-                ]
-
-                statistic += coefficient ** 2
-
-            pvalue = 1 - chi2.cdf(
-                statistic,
-                df=vecm_results.k_ar - 1
+            test = consumer_vecm.test_granger_causality(
+                caused=caused,
+                causing=causing
             )
 
             results.append({
@@ -45,17 +26,17 @@ def granger_vecm(
 
                 "Effect": caused,
 
-                "Statistic": statistic,
+                "Statistic": test.test_statistic,
 
-                "P-value": pvalue,
+                "P-value": test.pvalue,
 
-                "Granger Causality":
-                    pvalue < significance_level
+                "Reject H0": test.pvalue < 0.05
 
             })
 
-    return pd.DataFrame(results)
+    granger_df = pd.DataFrame(results)
 
+    granger_df.sort_values("P-value")
 
 def display_vecm_granger(
         vecm_results,
