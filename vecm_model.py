@@ -131,23 +131,6 @@ def export_vecm_results(
         f"{excel_name}.xlsx successfully saved."
     )
 
-def estimate_all_vecm_blocks(dict_of_df):
-
-    models = {}
-
-    consumer_block = build_consumer_block(
-        dict_of_df
-    )
-
-    models["Consumer"] = estimate_vecm(
-        consumer_block,
-        k_ar_diff=5,
-        coint_rank=1,
-        block_name="Consumer Block"
-    )
-
-    return models
-
 import pandas as pd
 
 
