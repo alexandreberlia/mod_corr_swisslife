@@ -243,9 +243,9 @@ INTERPRÉTATION ET UTILISATION DES MODÈLES VAR / VECM
 Cette section décrit les principales fonctions du module, leur utilité
 économique et la manière d'interpréter leurs résultats.
 
-──────────────────────────────────────────────────────────────────────────────
+
 1. SÉLECTION DU NOMBRE OPTIMAL DE RETARDS
-──────────────────────────────────────────────────────────────────────────────
+
 
 Fonction :
 
@@ -268,9 +268,9 @@ Sortie :
     HQIC                   12
     FPE                    15
 
-──────────────────────────────────────────────────────────────────────────────
+
 2. ESTIMATION D'UN VAR
-──────────────────────────────────────────────────────────────────────────────
+
 
 Fonction :
 
@@ -298,46 +298,69 @@ Chaque variable du système dépend :
     - de ses propres retards
     - des retards des autres variables du système
 
-Utilisations :
 
-    - prévisions
-    - causalité de Granger
-    - réponses impulsionnelles
-    - décomposition de variance
 
-──────────────────────────────────────────────────────────────────────────────
-3. COEFFICIENTS DU VAR
+─────────────────────────────────────────────────────────────────────────────
+3. INTERPRÉTATION DES ÉQUATIONS VAR
 ──────────────────────────────────────────────────────────────────────────────
 
 Fonction :
-
-    display_var_equations()
-
-Utilisation :
 
     display_var_equations(var_model)
 
 Objectif :
 
-    Visualiser les équations estimées.
+    Afficher les coefficients estimés pour chacune des équations du système.
 
 Exemple :
+
+    Variable dépendante :
+    GDP US Chained Dollars YoY SA (GDP)
+
+    const                                   0.007
+    L1.GDP                                  1.826
+    L1.CPI                                 -0.007
+    L1.Unemployment                        -0.036
+    L1.Industrial Production                0.037
+    ...
+
+Lecture :
+
+    L1.X signifie :
+
+        X(t−1)
+
+    c'est-à-dire la valeur observée une période auparavant.
+
+L'équation se lit donc :
 
     GDP(t)
 
     =
-    0.72 GDP(t-1)
-    -0.14 Inflation(t-1)
-    +0.06 Unemployment(t-1)
+    0.007
+    +
+    1.826 × GDP(t−1)
+    − 0.007 × CPI(t−1)
+    − 0.036 × Unemployment(t−1)
+    + 0.037 × Industrial Production(t−1)
+    + ...
 
 Interprétation :
 
-    Une augmentation de l'inflation à la période précédente est
-    associée à une baisse de la croissance du PIB à la période actuelle.
+    La croissance actuelle du PIB est influencée :
 
-Les coefficients décrivent :
+        - par son propre passé ;
+        - par l'inflation passée ;
+        - par le chômage passé ;
+        - par la production industrielle passée.
 
-    uniquement les relations de court et moyen terme.
+Dans un VAR :
+
+    chaque variable du système possède sa propre équation.
+
+Les coefficients mesurent uniquement les effets dynamiques de court et
+moyen terme.
+
 
 ──────────────────────────────────────────────────────────────────────────────
 4. MODELE VECM
