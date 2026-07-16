@@ -9,18 +9,47 @@ def compute_fevd(
     return var_results.fevd(periods)
 
 
-def plot_fevd(
+def plot_fevd_stacked(
         var_results,
+        variable,
         periods=24):
+
+    import matplotlib.pyplot as plt
+    import pandas as pd
 
     fevd = var_results.fevd(periods)
 
-    fevd.plot()
+    variables = var_results.names
 
+    variable_idx = variables.index(variable)
+
+    df = pd.DataFrame(
+        fevd.decomp[variable_idx],
+        columns=variables
+    )
+
+    df.index = range(1, periods + 1)
+
+    ax = df.plot.area(
+        figsize=(12, 6),
+        alpha=0.8
+    )
+
+    ax.set_title(
+        f"FEVD - {variable}"
+    )
+
+    ax.set_xlabel("Horizon")
+
+    ax.set_ylabel("Contribution")
+
+    plt.legend(
+        title="Shock",
+        bbox_to_anchor=(1.05, 1)
+    )
+
+    plt.tight_layout()
     plt.show()
-
-    return fevd
-
 
 def fevd_dataframe(
         var_results,
@@ -49,8 +78,8 @@ def fevd_dataframe(
                     "Contribution (%)":
 
                         fevd.decomp[
-                            horizon,
                             variable_idx,
+                            horizon,
                             shock_idx
                         ] * 100
                 })
@@ -66,7 +95,7 @@ def fevd_horizon(
     variables = var_results.names
 
     table = pd.DataFrame(
-        fevd.decomp[horizon-1],
+        fevd.decomp[:,horizon-1,:],
         index=variables,
         columns=variables
     )
