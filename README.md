@@ -955,3 +955,234 @@ L'IRF constitue généralement l'outil principal
 d'interprétation économique des modèles VAR.
 
 
+FORECAST ERROR VARIANCE DECOMPOSITION (FEVD)
+--------------------------------
+
+La Forecast Error Variance Decomposition (FEVD) permet de mesurer
+la contribution relative de chaque choc du système à l'erreur de prévision
+d'une variable donnée.
+
+Le FEVD répond à la question :
+
+    D'où proviennent les fluctuations observées ?
+
+ou encore :
+
+    Quelles variables expliquent la variance future
+    d'une variable donnée ?
+
+
+1. ESTIMATION DU FEVD
+
+Fonction :
+
+    compute_fevd()
+
+Utilisation :
+
+    fevd = compute_fevd(
+        var_model,
+        periods=24
+    )
+
+Objectif :
+
+    Décomposer la variance de prévision
+    des variables du système à différents horizons.
+
+2. VISUALISATION DU FEVD
+
+Fonction :
+
+    plot_fevd_stacked()
+
+Utilisation :
+
+    plot_fevd_stacked(
+        macro_core_var,
+        variable,
+        periods=24
+    )
+
+Résultat :
+
+    Graphique représentant la contribution
+    relative de chaque choc à travers le temps.
+
+Lecture :
+
+    Axe horizontal
+
+        →
+        horizon de prévision
+
+    Axe vertical
+
+        →
+        part expliquée de la variance
+
+Chaque couleur représente un choc différent.
+
+
+3. TABLEAU FEVD À UN HORIZON DONNÉ
+
+Fonction :
+
+    fevd_horizon()
+
+Utilisation :
+
+    fevd_horizon(
+        macro_core_var,
+        horizon=12
+    )
+
+Exemple :
+
+                            GDP     CPI     UNEMP    INDUS
+
+    GDP                     58       8       7        27
+
+    CPI                     12      74       5         9
+
+    UNEMP                   18       3      69        10
+
+Lecture :
+
+Première ligne :
+
+    GDP
+
+La variance de prévision du PIB à l'horizon 12 est expliquée par :
+
+    58 % → chocs propres du PIB
+
+     8 % → chocs d'inflation
+
+     7 % → chocs de chômage
+
+    27 % → chocs de production industrielle
+
+La somme des contributions est égale à :
+
+    100 %
+
+
+4. INTERPRÉTATION ÉCONOMIQUE
+
+Supposons :
+
+    GDP
+
+        Industrial Production = 27 %
+
+Interprétation :
+
+    27 % de l'incertitude future du PIB
+    provient des chocs de production industrielle.
+
+La production industrielle constitue donc
+un moteur important des fluctuations du PIB.
+
+Autre exemple :
+
+    Unemployment
+
+        GDP = 35 %
+
+Interprétation :
+
+    Une part importante des fluctuations futures du chômage
+    est expliquée par les chocs de croissance économique.
+
+
+5. COMPARAISON AVEC LES IRF
+
+IRF :
+
+    Question :
+
+        Que se passe-t-il lorsqu'un choc apparaît ?
+
+Exemple :
+
+    Choc positif sur la production industrielle
+
+        ↓
+
+    Hausse du PIB
+
+        ↓
+
+    Amplitude maximale : +1.35
+
+Le FEVD répond à une question complémentaire :
+
+    Quelle part des fluctuations du PIB
+    est attribuable à ce type de choc ?
+
+Exemple :
+
+    Production industrielle
+
+        ↓
+
+    Explique 27 % de la variance du PIB.
+
+
+6. COMPARAISON AVEC LE TEST DE GRANGER
+
+Granger :
+
+    Industrial Production
+                ↓
+                GDP
+
+Interprétation :
+
+    La production industrielle améliore la prévision du PIB.
+
+FEVD :
+
+    Industrial Production
+                ↓
+            27 % du PIB
+
+Interprétation :
+
+    Les chocs de production industrielle expliquent
+    27 % des fluctuations futures du PIB.
+
+Ainsi :
+
+    Granger
+        mesure l'existence d'un lien prédictif.
+
+    FEVD
+        mesure l'importance quantitative du lien.
+
+
+7. IDENTIFICATION DES VARIABLES DOMINANTES
+
+Le FEVD permet d'identifier les variables
+les plus influentes du système.
+
+Une variable est considérée comme dominante lorsqu'elle explique
+une part importante de la variance des autres variables.
+
+Exemple :
+
+    Industrial Production explique :
+
+        27 % du PIB
+
+        18 % du chômage
+
+        12 % de l'inflation
+
+Conclusion :
+
+    La production industrielle constitue un facteur central
+    dans la dynamique du système macroéconomique.
+
+
