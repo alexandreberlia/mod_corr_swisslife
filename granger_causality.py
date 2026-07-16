@@ -1,7 +1,7 @@
 import pandas as pd
 
 
-def granger_causality_matrix(
+def granger_var(
         model,
         significance_level=0.05):
 
@@ -41,14 +41,14 @@ def granger_causality_matrix(
     return pd.DataFrame(results)
 
 
-def display_granger_results(
+def display_granger_var(
         model,
         significance_level=0.05):
     """
     Display significant Granger causalities.
     """
 
-    results = granger_causality_matrix(
+    results = granger_var(
         model,
         significance_level
     )
@@ -79,7 +79,7 @@ def export_granger_results(
         model,
         excel_name="Granger_Causality"):
     
-    results = granger_causality_matrix(
+    results = granger_var(
         model
     )
 
