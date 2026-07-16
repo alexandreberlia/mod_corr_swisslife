@@ -1,6 +1,5 @@
 import pandas as pd
 
-# Conversion des colonnes de dates
 def convert_date_columns(df):
     for i in range(0, len(df.columns), 2):
         column = df.columns[i]
@@ -55,14 +54,42 @@ def generate_dataframes(df):
         if new_df.empty:
             break
 
-
-# ------------------------
-# EXECUTION
-# ------------------------
-
 df = convert_date_columns(df)
 
 generate_dataframes(df)
+df_original = pd.read_csv(
+    "corrected_file.csv"
+)
+
+mapping = {}
+
+for i in range(
+        0,
+        len(df_original.columns)-1,
+        2):
+
+    date_col = df_original.columns[i]
+
+    value_col = df_original.columns[i+1]
+
+    if str(date_col).startswith(
+            "Dates for "):
+
+        mapping[
+            f"Unnamed: {i+1}"
+        ] = value_col
+
+
+for i in range(1, 100):
+
+    df_name = f"df{i}"
+
+    if df_name in globals():
+
+        globals()[df_name].rename(
+            columns=mapping,
+            inplace=True
+        )
 
 dict_of_df = {}
 
