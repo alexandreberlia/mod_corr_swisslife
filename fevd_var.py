@@ -2,14 +2,14 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 
-def compute_fevd(
+def compute_fevd_var(
         var_results,
         periods=24):
 
     return var_results.fevd(periods)
 
 
-def plot_fevd_stacked(
+def plot_fevd_stacked_var(
         var_results,
         variable,
         periods=24):
@@ -51,7 +51,7 @@ def plot_fevd_stacked(
     plt.tight_layout()
     plt.show()
 
-def fevd_dataframe(
+def fevd_dataframe_var(
         var_results,
         periods=24):
 
@@ -87,7 +87,7 @@ def fevd_dataframe(
     return pd.DataFrame(results)
 
 
-def fevd_horizon(
+def fevd_horizon_var(
         var_results,
         horizon=12):
     fevd = var_results.fevd(horizon)
@@ -103,7 +103,7 @@ def fevd_horizon(
     return table * 100
 
 
-def export_fevd(
+def export_fevd_var(
         var_results,
         periods=24,
         excel_name="FEVD_Results"):
