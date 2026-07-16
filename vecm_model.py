@@ -159,15 +159,15 @@ def display_gamma_matrices(results):
     n = len(results.names)
 
     all_gamma=[]
-    for i in range(consumer_vecm.k_ar - 1):
+    for i in range(results.k_ar - 1):
 
             start = i * n
             end = (i + 1) * n
 
             gamma_i = pd.DataFrame(
-                consumer_vecm.gamma[:, start:end],
-                index=consumer_vecm.names,
-                columns=consumer_vecm.names)
+                results.gamma[:, start:end],
+                index=results.names,
+                columns=results.names)
             gamma_i["Gamma"]=f"Gamma_{i+1}"
             all_gamma.append(gamma_i)
     gamma_matrix=pd.concat(all_gamma)
