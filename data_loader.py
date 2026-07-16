@@ -1,3 +1,5 @@
+import os
+import pandas as pd
 current_directory = os.getcwd()
 
 def load_and_preview_csv(file_name):
