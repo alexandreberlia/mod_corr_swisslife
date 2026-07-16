@@ -62,7 +62,7 @@ def display_cointegration_relation(results):
         index=results.names
     )
 
-    print(beta)
+    return beta
 
 def display_error_correction_terms(results):
 
@@ -76,7 +76,7 @@ def display_error_correction_terms(results):
         index=results.names
     )
 
-    print(alpha)
+    return alpha
 
 def export_vecm_results(
         results,
@@ -92,6 +92,22 @@ def export_vecm_results(
         results.alpha,
         index=results.names
     )
+        
+    n = len(results.names)
+
+    all_gamma=[]
+    for i in range(consumer_vecm.k_ar - 1):
+
+            start = i * n
+            end = (i + 1) * n
+
+            gamma_i = pd.DataFrame(
+                consumer_vecm.gamma[:, start:end],
+                index=consumer_vecm.names,
+                columns=consumer_vecm.names)
+            gamma_i["Gamma"]=f"Gamma_{i+1}"
+            all_gamma.append(gamma_i)
+    gamma_matrix=pd.concat(all_gamma)
 
     with pd.ExcelWriter(
             f"{excel_name}.xlsx"
@@ -105,6 +121,10 @@ def export_vecm_results(
         alpha.to_excel(
             writer,
             sheet_name="Adjustment"
+        )
+        gamma_matrix.to_excel(
+                writer,
+                sheet_name="Coefficient de court terme"
         )
 
     print(
@@ -138,23 +158,17 @@ def display_gamma_matrices(results):
 
     n = len(results.names)
 
-    print()
-    print("=" * 100)
-    print("SHORT-RUN GAMMA MATRICES")
-    print("=" * 100)
+    all_gamma=[]
+    for i in range(consumer_vecm.k_ar - 1):
 
-    for i in range(results.k_ar - 1):
+            start = i * n
+            end = (i + 1) * n
 
-        start = i * n
-        end = (i + 1) * n
-
-        gamma_i = pd.DataFrame(
-            results.gamma[:, start:end],
-            index=results.names,
-            columns=results.names
-        )
-
-        print()
-        print(f"Gamma_{i+1}")
-        print("-" * 100)
-        print(gamma_i)
+            gamma_i = pd.DataFrame(
+                consumer_vecm.gamma[:, start:end],
+                index=consumer_vecm.names,
+                columns=consumer_vecm.names)
+            gamma_i["Gamma"]=f"Gamma_{i+1}"
+            all_gamma.append(gamma_i)
+    gamma_matrix=pd.concat(all_gamma)
+    return gamma_matrix
