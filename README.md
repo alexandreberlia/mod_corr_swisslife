@@ -910,4 +910,48 @@ et non comme :
     la cause économique directe des ventes au détail.
 
 
+IMPULSE RESPONSE FUNCTIONS (IRF)
+--------------------------------
+
+Les fonctions de réponse impulsionnelle mesurent
+la réaction dynamique des variables du système
+suite à un choc exogène sur l'une d'elles.
+
+Question économique :
+
+    Que se passe-t-il lorsqu'une variable
+    subit un choc inattendu ?
+
+Exemple :
+
+    Industrial Production
+            ↓
+          GDP
+
+L'IRF permet de mesurer :
+
+    - la direction du choc
+    - son amplitude
+    - sa durée
+    - sa vitesse de dissipation
+
+Lecture :
+
+    Axe horizontal
+        → horizon temporel
+
+    Axe vertical
+        → réponse de la variable
+
+Une réponse positive signifie :
+
+    la variable augmente après le choc.
+
+Une réponse négative signifie :
+
+    la variable diminue après le choc.
+
+L'IRF constitue généralement l'outil principal
+d'interprétation économique des modèles VAR.
+
 
