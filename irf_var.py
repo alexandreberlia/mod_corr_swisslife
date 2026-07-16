@@ -2,12 +2,12 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 
-def compute_irf(
+def compute_irf_var(
         var_results,
         periods=24):
     return var_results.irf(periods)
 
-def plot_irf(
+def plot_irf_var(
         var_results,
         periods=24):
     """
@@ -25,7 +25,7 @@ def plot_irf(
     return irf
 
 
-def plot_single_irf(
+def plot_single_irf_var(
         var_results,
         impulse,
         response,
@@ -46,7 +46,7 @@ def plot_single_irf(
     return irf
 
 
-def irf_dataframe(
+def irf_dataframe_var(
         var_results,
         periods=24):
     """
@@ -84,7 +84,7 @@ def irf_dataframe(
     return pd.DataFrame(results)
 
 
-def export_irf(
+def export_irf_var(
         var_results,
         periods=24,
         excel_name="IRF_Results"):
