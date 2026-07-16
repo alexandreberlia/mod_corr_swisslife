@@ -243,9 +243,9 @@ INTERPRÉTATION ET UTILISATION DES MODÈLES VAR / VECM
 Cette section décrit les principales fonctions du module, leur utilité
 économique et la manière d'interpréter leurs résultats.
 
-──────────────────────────────────────────────────────────────────────────────
+
 1. SÉLECTION DU NOMBRE OPTIMAL DE RETARDS
-──────────────────────────────────────────────────────────────────────────────
+
 
 Fonction :
 
@@ -268,9 +268,9 @@ Sortie :
     HQIC                   12
     FPE                    15
 
-──────────────────────────────────────────────────────────────────────────────
+
 2. ESTIMATION D'UN VAR
-──────────────────────────────────────────────────────────────────────────────
+
 
 Fonction :
 
@@ -298,50 +298,68 @@ Chaque variable du système dépend :
     - de ses propres retards
     - des retards des autres variables du système
 
-Utilisations :
 
-    - prévisions
-    - causalité de Granger
-    - réponses impulsionnelles
-    - décomposition de variance
-
-──────────────────────────────────────────────────────────────────────────────
-3. COEFFICIENTS DU VAR
-──────────────────────────────────────────────────────────────────────────────
+3. INTERPRÉTATION DES ÉQUATIONS VAR
 
 Fonction :
-
-    display_var_equations()
-
-Utilisation :
 
     display_var_equations(var_model)
 
 Objectif :
 
-    Visualiser les équations estimées.
+    Afficher les coefficients estimés pour chacune des équations du système.
 
 Exemple :
+
+    Variable dépendante :
+    GDP US Chained Dollars YoY SA (GDP)
+
+    const                                   0.007
+    L1.GDP                                  1.826
+    L1.CPI                                 -0.007
+    L1.Unemployment                        -0.036
+    L1.Industrial Production                0.037
+    ...
+
+Lecture :
+
+    L1.X signifie :
+
+        X(t−1)
+
+    c'est-à-dire la valeur observée une période auparavant.
+
+L'équation se lit donc :
 
     GDP(t)
 
     =
-    0.72 GDP(t-1)
-    -0.14 Inflation(t-1)
-    +0.06 Unemployment(t-1)
+    0.007
+    +
+    1.826 × GDP(t−1)
+    − 0.007 × CPI(t−1)
+    − 0.036 × Unemployment(t−1)
+    + 0.037 × Industrial Production(t−1)
+    + ...
 
 Interprétation :
 
-    Une augmentation de l'inflation à la période précédente est
-    associée à une baisse de la croissance du PIB à la période actuelle.
+    La croissance actuelle du PIB est influencée :
 
-Les coefficients décrivent :
+        - par son propre passé ;
+        - par l'inflation passée ;
+        - par le chômage passé ;
+        - par la production industrielle passée.
 
-    uniquement les relations de court et moyen terme.
+Dans un VAR :
 
-──────────────────────────────────────────────────────────────────────────────
+    chaque variable du système possède sa propre équation.
+
+Les coefficients mesurent uniquement les effets dynamiques de court et
+moyen terme.
+
+
 4. MODELE VECM
-──────────────────────────────────────────────────────────────────────────────
 
 Le modèle estimé est :
 
@@ -357,9 +375,7 @@ Le modèle estimé est :
     +
     εt
 
-──────────────────────────────────────────────────────────────────────────────
 5. TEST DE JOHANSEN
-──────────────────────────────────────────────────────────────────────────────
 
 Fonction :
 
@@ -403,9 +419,7 @@ sous la forme :
 
     coint_rank
 
-──────────────────────────────────────────────────────────────────────────────
 6. ESTIMATION D'UN VECM
-──────────────────────────────────────────────────────────────────────────────
 
 Fonction :
 
@@ -429,9 +443,7 @@ Objectif :
 
 Entre des variables non stationnaires.
 
-──────────────────────────────────────────────────────────────────────────────
 7. RELATION DE COINTÉGRATION (BETA)
-──────────────────────────────────────────────────────────────────────────────
 
 Fonction :
 
@@ -451,7 +463,7 @@ Exemple :
     Payrolls                             0.030
     ADP                                 -0.013
 
-La relation estimée est :
+La relation de long terme estimée est :
 
     Unemployment
     +
@@ -461,22 +473,28 @@ La relation estimée est :
     =
     0
 
-Interprétation :
+Cette équation ne décrit pas les variations d'une période à l'autre.
 
-    Cette équation représente une relation d'équilibre de long terme.
+Elle représente :
 
-Elle ne décrit pas :
+    l'équilibre de long terme du système.
 
-    l'évolution d'une période à l'autre,
+L'interprétation économique est :
 
-mais :
+    lorsque cette relation est rompue,
+    le système tend à revenir vers cette relation d'équilibre.
 
-    la combinaison des variables vers laquelle le système tend
-    à revenir à long terme.
+Si plusieurs colonnes apparaissent :
 
-──────────────────────────────────────────────────────────────────────────────
+    β1
+    β2
+    β3
+
+alors plusieurs relations de long terme ont été détectées
+par le test de Johansen.
+
+
 8. TERMES DE CORRECTION D'ERREUR (ALPHA)
-──────────────────────────────────────────────────────────────────────────────
 
 Fonction :
 
@@ -496,21 +514,56 @@ Exemple :
     Payrolls           0.01
     ADP               -0.05
 
-Interprétation :
 
-    Le chômage corrige environ 24 % du déséquilibre observé
-    à chaque période.
+Lecture :
 
-Plus la valeur absolue du coefficient est élevée :
+Chaque coefficient α mesure la réaction de la variable
+à un déséquilibre de long terme.
 
-    plus la variable participe à la correction de l'équilibre.
+Exemple :
 
-Les coefficients α sont souvent les résultats les plus intéressants
-d'un VECM d'un point de vue économique.
+    Unemployment = -0.24
 
-──────────────────────────────────────────────────────────────────────────────
+signifie :
+
+    Lorsque le système s'éloigne de l'équilibre,
+    le taux de chômage réduit une partie de cet écart
+    à la période suivante à hauteur de 24%.
+
+Règle générale :
+
+    α proche de 0
+
+        →
+        la variable participe peu au réajustement.
+
+    |α| élevé
+
+        →
+        la variable est fortement impliquée
+        dans le retour à l'équilibre.
+
+Signe :
+
+    α négatif
+
+        →
+        correction dans le sens du retour à l'équilibre.
+
+    α positif
+
+        →
+        ajustement dans le sens opposé.
+
+Les coefficients α sont souvent le résultat économiquement le plus
+important d'un VECM.
+
+Ils répondent à la question :
+
+    "Qui corrige les déséquilibres de long terme ?"
+
+
 9. DYNAMIQUE DE COURT TERME (GAMMA)
-──────────────────────────────────────────────────────────────────────────────
 
 Fonction :
 
@@ -522,33 +575,67 @@ Utilisation :
 
 Objectif :
 
-    Afficher les matrices Γ.
+    Étudier la dynamique de court terme.
+
 
 Exemple :
 
     Gamma_1
 
-                        GDP     CPI
-    GDP               0.42   -0.10
-    CPI               0.05    0.28
+                                Confidence  Michigan  Retail Sales  Consumption
+
+    Confidence                   0.824      0.065      -0.001        0.074
+
+    Michigan                     0.040      0.782       0.020       -0.025
+
+    Retail Sales                 0.012     -0.012       0.850        0.019
+
+    Consumption                  0.006     -0.004       0.016        0.855
+
+Règle de lecture :
+
+    Ligne
+        =
+        variable expliquée.
+
+    Colonne
+        =
+        variable explicative retardée.
+
+Première ligne :
+
+    ΔConfidence(t)
+
+    =
+    0.824 × ΔConfidence(t−1)
+    +
+    0.065 × ΔMichigan(t−1)
+    −
+    0.001 × ΔRetailSales(t−1)
+    +
+    0.074 × ΔConsumption(t−1)
 
 Interprétation :
 
-    Les matrices Gamma décrivent les effets des variations passées
-    sur les variations présentes.
+    Les variations passées de la confiance des consommateurs
+    ont un fort impact sur les variations futures de cette même variable.
 
-Exemple :
+Observation typique :
 
-    Une hausse du PIB à la période précédente influence
-    positivement la variation actuelle du PIB.
+    Des coefficients élevés sur la diagonale indiquent
+    une forte inertie propre des séries.
 
-Les matrices Γ représentent :
+Les matrices Γ décrivent :
 
-    la dynamique de court terme du système.
+    la dynamique de court terme.
 
-──────────────────────────────────────────────────────────────────────────────
+Elles répondent à la question :
+
+    "Comment les variations passées influencent-elles
+    les variations présentes ?"
+
+
 10. RÉSUMÉ DE L'INTERPRÉTATION
-──────────────────────────────────────────────────────────────────────────────
 
 VAR :
 
