@@ -1,5 +1,5 @@
 import pandas as pd
-from statmodels.tsa.vector_ar.vecm import(VECM,select_order,select_coint_rank)
+from statsmodels.tsa.vector_ar.vecm import(VECM,select_order,select_coint_rank)
 
 
 def granger_vecm(
