@@ -66,7 +66,7 @@ def fevd_horizon(
     variables = var_results.names
 
     table = pd.DataFrame(
-        fevd.decomp[horizon-1,:],
+        fevd.decomp[:,horizon-1,:],
         index=variables,
         columns=variables
     )
