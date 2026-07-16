@@ -234,9 +234,9 @@ constitue souvent un compromis intéressant.
 
 L'objectif final est d'obtenir une compréhension dynamique des relations
 macroéconomiques et de produire des scénarios cohérents de prévision.
-"""
 
-"""
+
+
 INTERPRÉTATION ET UTILISATION DES MODÈLES VAR / VECM
 ===================================================
 
@@ -667,4 +667,247 @@ En pratique :
 
         "Comment les variables réagissent-elles les unes aux autres,
         tout en respectant une relation économique de long terme ?"
-"""
+
+
+11. TESTS DE CAUSALITÉ DE GRANGER
+
+Les tests de causalité de Granger permettent d'identifier les relations
+prédictives entre les variables d'un système VAR ou VECM.
+
+Important :
+
+    Une causalité de Granger n'est pas une causalité économique.
+
+Elle signifie uniquement que :
+
+    les valeurs passées d'une variable améliorent significativement
+    la prévision d'une autre variable.
+
+Autrement dit :
+
+    X Granger-cause Y
+
+signifie :
+
+    les retards de X apportent une information utile
+    pour prévoir Y.
+
+12. CAUSALITÉ DE GRANGER DANS UN VAR
+
+Fonction :
+
+    granger_causality_matrix(var_model)
+
+Utilisation :
+
+    granger_results = granger_causality_matrix(
+        macro_core_var
+    )
+
+Résultat :
+
+    Cause                    Effect
+    Industrial Production    GDP
+    GDP                      Unemployment
+    ...
+
+Chaque ligne teste :
+
+    H0 :
+
+        X ne Granger-cause pas Y
+
+contre :
+
+    H1 :
+
+        X Granger-cause Y
+
+La décision est prise à partir de la p-value.
+
+Si :
+
+    p-value < seuil de significativité
+
+alors :
+
+    H0 est rejetée
+
+et :
+
+    X Granger-cause Y
+
+Exemple :
+
+    Cause:
+        Industrial Production
+
+    Effect:
+        GDP
+
+    p-value:
+        0.003
+
+Interprétation :
+
+    La production industrielle contient une information prédictive
+    significative pour expliquer l'évolution future du PIB.
+
+
+13. CAUSALITÉ DE GRANGER DANS UN VECM
+
+Fonction :
+
+    vecm_granger_matrix(vecm_model)
+
+Utilisation :
+
+    vecm_granger_matrix(
+        consumer_vecm,
+        significance_level=0.10
+    )
+
+Résultat :
+
+                                Retail Sales
+    Consumer Confidence           0.003
+
+Lecture :
+
+    Ligne
+        =
+        variable explicative (Cause)
+
+    Colonne
+        =
+        variable expliquée (Effect)
+
+    Valeur
+        =
+        p-value du test de Granger
+
+Dans l'exemple :
+
+    Consumer Confidence → Retail Sales
+
+    p-value = 0.003
+
+Comme :
+
+    0.003 < 0.10
+
+on rejette :
+
+    H0 :
+    Consumer Confidence ne Granger-cause pas Retail Sales
+
+Conclusion :
+
+    La confiance des consommateurs améliore significativement
+    la prévision des ventes au détail.
+
+
+14. COMMENT INTERPRÉTER LES P-VALUES
+
+Hypothèse nulle :
+
+    H0 :
+    absence de causalité de Granger
+
+Si :
+
+    p-value < α
+
+alors :
+
+    H0 est rejetée
+
+et une relation de Granger est retenue.
+
+Exemple :
+
+    p-value = 0.001
+
+Avec :
+
+    α = 5 %
+
+ou
+
+    α = 10 %
+
+Conclusion :
+
+    relation significative.
+
+Inversement :
+
+    p-value = 0.45
+
+Interprétation :
+
+    les données ne permettent pas d'affirmer
+    l'existence d'un contenu prédictif.
+
+
+15. COMMENT UTILISER LES RÉSULTATS
+
+Les résultats de Granger permettent :
+
+    - d'identifier les variables les plus informatives ;
+    - de comprendre la chaîne de transmission économique ;
+    - de préparer l'analyse IRF ;
+    - de construire des modèles de prévision plus pertinents.
+
+Exemple :
+
+    Retail Sales
+            ↓
+    Consumption
+
+signifie :
+
+    les ventes au détail aident à prévoir
+    la consommation future.
+
+Autre exemple :
+
+    GDP
+            ↓
+    Unemployment
+
+signifie :
+
+    la croissance apporte une information utile
+    pour prévoir l'évolution du chômage.
+
+
+16. LIMITES DU TEST DE GRANGER
+
+Le test ne démontre pas :
+
+    qu'une variable provoque directement une autre.
+
+Il démontre uniquement :
+
+    qu'une variable contient une information prédictive
+    utile pour anticiper une autre variable.
+
+Ainsi :
+
+    Consumer Confidence
+            ↓
+    Retail Sales
+
+doit être interprété comme :
+
+    La confiance des consommateurs améliore la prévision
+    des ventes au détail.
+
+et non comme :
+
+    La confiance des consommateurs est nécessairement
+    la cause économique directe des ventes au détail.
+
+
+
