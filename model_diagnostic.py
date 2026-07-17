@@ -197,3 +197,69 @@ def vecm_portmanteau_test(
 
     return results_df
 
+import pandas as pd
+import numpy as np
+
+
+def vecm_stability_test(vecm_results):
+    """
+    Stability test for VECM.
+
+    Parameters
+    ----------
+    vecm_results : VECMResults
+
+    Returns
+    -------
+    pd.DataFrame
+    """
+
+    var_rep = vecm_results.var_rep
+
+    roots = np.linalg.eigvals(var_rep)
+
+    stability_df = pd.DataFrame({
+
+        "Root": roots,
+
+        "Modulus": np.abs(roots)
+
+    })
+
+    stability_df["Stable Root"] = (
+        stability_df["Modulus"] < 1
+    )
+
+    print()
+    print("=" * 100)
+    print("VECM STABILITY TEST")
+    print("=" * 100)
+    print()
+
+    print(stability_df)
+
+    print()
+
+    if stability_df["Stable Root"].all():
+
+        print(
+            "Stable VECM system"
+        )
+
+    else:
+
+        print(
+            "Unstable VECM system"
+        )
+
+    return stability_df
+
+def is_vecm_stable(vecm_results):
+
+    roots = np.linalg.eigvals(
+        vecm_results.var_rep
+    )
+
+    return np.all(
+        np.abs(roots) < 1
+    )
