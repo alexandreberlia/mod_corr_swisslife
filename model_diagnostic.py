@@ -197,69 +197,165 @@ def vecm_portmanteau_test(
 
     return results_df
 
-import pandas as pd
-import numpy as np
 
-
-def vecm_stability_test(vecm_results):
+def vecm_validation_report(
+        vecm_results,
+        johansen_results,
+        portmanteau_results=None):
     """
-    Stability test for VECM.
+    Global VECM validation report.
 
     Parameters
     ----------
     vecm_results : VECMResults
+
+    johansen_results : dict
+        Returned by johansen_summary()
+
+    portmanteau_results : pd.DataFrame, optional
+        Returned by vecm_portmanteau_test()
 
     Returns
     -------
     pd.DataFrame
     """
 
-    var_rep = vecm_results.var_rep
+    diagnostics = []
 
-    roots = np.linalg.eigvals(var_rep)
+    n_variables = len(
+        vecm_results.names
+    )
 
-    stability_df = pd.DataFrame({
+    estimated_rank = (
+        johansen_results["rank"]
+    )
 
-        "Root": roots,
+    vecm_rank = (
+        vecm_results.coint_rank
+    )
 
-        "Modulus": np.abs(roots)
+    # --------------------------------------------------
+    # Cointegration rank validity
+    # --------------------------------------------------
+
+    diagnostics.append({
+
+        "Diagnostic":
+            "Valid Cointegration Rank",
+
+        "Result":
+            f"{vecm_rank}/{n_variables}",
+
+        "Pass":
+            (
+                0 < vecm_rank < n_variables
+            )
 
     })
 
-    stability_df["Stable Root"] = (
-        stability_df["Modulus"] < 1
+    # --------------------------------------------------
+    # Johansen consistency
+    # --------------------------------------------------
+
+    diagnostics.append({
+
+        "Diagnostic":
+            "Johansen Consistency",
+
+        "Result":
+            (
+                vecm_rank ==
+                estimated_rank
+            ),
+
+        "Pass":
+            (
+                vecm_rank ==
+                estimated_rank
+            )
+
+    })
+
+    # --------------------------------------------------
+    # Error correction mechanism
+    # --------------------------------------------------
+
+    alpha_exists = np.any(
+        np.abs(
+            vecm_results.alpha
+        ) > 1e-6
+    )
+
+    diagnostics.append({
+
+        "Diagnostic":
+            "Error Correction Mechanism",
+
+        "Result":
+            alpha_exists,
+
+        "Pass":
+            alpha_exists
+
+    })
+
+    # --------------------------------------------------
+    # Residual whiteness
+    # --------------------------------------------------
+
+    if portmanteau_results is not None:
+
+        white_noise = (
+
+            portmanteau_results[
+                "Residual White Noise"
+            ]
+
+            .all()
+
+        )
+
+        diagnostics.append({
+
+            "Diagnostic":
+                "Residual Whiteness",
+
+            "Result":
+                white_noise,
+
+            "Pass":
+                white_noise
+
+        })
+
+    # --------------------------------------------------
+    # Final report
+    # --------------------------------------------------
+
+    report = pd.DataFrame(
+        diagnostics
     )
 
     print()
     print("=" * 100)
-    print("VECM STABILITY TEST")
+    print("VECM VALIDATION REPORT")
     print("=" * 100)
     print()
 
-    print(stability_df)
+    print(report)
 
     print()
 
-    if stability_df["Stable Root"].all():
+    if report["Pass"].all():
 
         print(
-            "Stable VECM system"
+            "✅ VECM ECONOMETRICALLY VALID"
         )
 
     else:
 
         print(
-            "Unstable VECM system"
+            "⚠️ SOME DIAGNOSTICS REQUIRE ATTENTION"
         )
 
-    return stability_df
-
-def is_vecm_stable(vecm_results):
-
-    roots = np.linalg.eigvals(
-        vecm_results.var_rep
-    )
-
-    return np.all(
-        np.abs(roots) < 1
-    )
+    return report
