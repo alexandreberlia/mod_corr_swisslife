@@ -1,6 +1,8 @@
 from statsmodels.tsa.stattools import adfuller, kpss
 
-def integration_order(series):
+
+def integration_order(
+        series):
 
     series = pd.to_numeric(
         series,
@@ -11,6 +13,7 @@ def integration_order(series):
         return "Insufficient observations"
 
     try:
+
         adf_level = adfuller(
             series,
             autolag='AIC'
@@ -18,10 +21,12 @@ def integration_order(series):
 
         if adf_level < 0.05:
             return "I(0)"
-    except:
+
+    except Exception:
         pass
 
     try:
+
         adf_diff1 = adfuller(
             series.diff().dropna(),
             autolag='AIC'
@@ -29,10 +34,12 @@ def integration_order(series):
 
         if adf_diff1 < 0.05:
             return "I(1)"
-    except:
+
+    except Exception:
         pass
 
     try:
+
         adf_diff2 = adfuller(
             series.diff().diff().dropna(),
             autolag='AIC'
@@ -40,7 +47,8 @@ def integration_order(series):
 
         if adf_diff2 < 0.05:
             return "I(2)"
-    except:
+
+    except Exception:
         pass
 
     return "> I(2)"
@@ -49,11 +57,35 @@ def integration_order(series):
 def stationarity_report(
         save_excel='no',
         excel_name='Stationarity_Report',
-        cell_width=75):
+        cell_width=75,
+        scope='block'):
 
     results = []
 
-    for df_name, dataframe in dict_of_df.items():
+    if scope == 'block':
+
+        datasets = list(
+            dict_of_df.items()
+        )
+
+    elif scope == 'all':
+
+        all_df = pd.concat(
+            dict_of_df.values(),
+            axis=1
+        )
+
+        datasets = [
+            ('FULL_DATASET', all_df)
+        ]
+
+    else:
+
+        raise ValueError(
+            "scope must be 'block' or 'all'"
+        )
+
+    for df_name, dataframe in datasets:
 
         for col in dataframe.columns:
 
@@ -66,44 +98,58 @@ def stationarity_report(
                 continue
 
             try:
+
                 adf_stat, adf_p, _, _, _, _ = adfuller(
                     series,
                     autolag='AIC'
                 )
-            except:
+
+            except Exception:
+
                 adf_stat = np.nan
                 adf_p = np.nan
 
             try:
+
                 kpss_stat, kpss_p, _, _ = kpss(
                     series,
                     regression='c',
                     nlags='auto'
                 )
-            except:
+
+            except Exception:
+
                 kpss_stat = np.nan
                 kpss_p = np.nan
 
-            if pd.notna(adf_p):
-                adf_stationary = adf_p < 0.05
-            else:
-                adf_stationary = np.nan
+            adf_stationary = (
+                adf_p < 0.05
+                if pd.notna(adf_p)
+                else np.nan
+            )
 
-            if pd.notna(kpss_p):
-                kpss_stationary = kpss_p > 0.05
-            else:
-                kpss_stationary = np.nan
+            kpss_stationary = (
+                kpss_p > 0.05
+                if pd.notna(kpss_p)
+                else np.nan
+            )
 
             results.append({
+
                 "DataFrame": df_name,
                 "Variable": col,
+
                 "ADF Statistic": adf_stat,
                 "ADF p-value": adf_p,
                 "ADF Stationary": adf_stationary,
+
                 "KPSS Statistic": kpss_stat,
                 "KPSS p-value": kpss_p,
                 "KPSS Stationary": kpss_stationary,
-                "Integration Order": integration_order(series)
+
+                "Integration Order":
+                    integration_order(series)
+
             })
 
     results_df = pd.DataFrame(results)
@@ -131,9 +177,12 @@ def stationarity_report(
     return results_df
 
 
-def stationarity_summary():
+def stationarity_summary(
+        scope='block'):
 
-    df = stationarity_report()
+    df = stationarity_report(
+        scope=scope
+    )
 
     summary = df[
         [
@@ -151,15 +200,23 @@ def stationarity_summary():
     return summary
 
 
-def print_stationarity_summary():
+def print_stationarity_summary(
+        scope='block'):
 
-    summary = stationarity_summary()
+    summary = stationarity_summary(
+        scope=scope
+    )
 
-    print("\n")
+    print()
     print("=" * 100)
     print("STATIONARITY SUMMARY")
     print("=" * 100)
+    print()
 
-    print(summary.to_string(index=False))
+    print(
+        summary.to_string(
+            index=False
+        )
+    )
 
     return summary
