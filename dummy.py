@@ -21,4 +21,4 @@ def dummy(
 
         dummy.loc[start:] = 1
 
-    return dummy
+    return D
