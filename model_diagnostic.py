@@ -72,6 +72,116 @@ def portmanteau_test(
 
     return results
 
+import numpy as np
+import pandas as pd
+from scipy.stats import chi2
+
+
+def hosking_portmanteau(
+        residuals,
+        nlags=12):
+    """
+    Hosking multivariate Portmanteau test.
+
+    Parameters
+    ----------
+    residuals : DataFrame
+
+    nlags : int
+
+    Returns
+    -------
+    dict
+    """
+
+    residuals = np.asarray(residuals)
+
+    T, k = residuals.shape
+
+    C0 = np.cov(
+        residuals,
+        rowvar=False
+    )
+
+    C0_inv = np.linalg.inv(C0)
+
+    Q = 0
+
+    for h in range(1, nlags + 1):
+
+        Gamma_h = np.zeros((k, k))
+
+        for t in range(h, T):
+
+            Gamma_h += np.outer(
+                residuals[t],
+                residuals[t - h]
+            )
+
+        Gamma_h /= T
+
+        term = np.trace(
+            Gamma_h.T
+            @ C0_inv
+            @ Gamma_h
+            @ C0_inv
+        )
+
+        Q += term / (T - h)
+
+    Q *= T**2
+
+    df = k**2 * (nlags)
+
+    pvalue = 1 - chi2.cdf(
+        Q,
+        df
+    )
+
+    print()
+    print("=" * 80)
+    print("HOSKING PORTMANTEAU TEST")
+    print("=" * 80)
+    print()
+
+    print(f"Q Statistic : {Q:,.4f}")
+    print(f"Degrees of Freedom : {df}")
+    print(f"P-value : {pvalue:.6f}")
+
+    if pvalue > 0.05:
+
+        print(
+            "\n✅ Residuals resemble white noise."
+        )
+
+    else:
+
+        print(
+            "\n❌ Residual autocorrelation detected."
+        )
+
+    return {
+
+        "Q Statistic": Q,
+        "Degrees of Freedom": df,
+        "P-value": pvalue
+
+    }
+def li_mcleod_test(
+        residuals,
+        nlags=12):
+
+    residuals_sq = (
+        pd.DataFrame(
+            residuals
+        ) ** 2
+    )
+
+    return hosking_portmanteau(
+        residuals_sq,
+        nlags=nlags
+    )
+
 def lm_test(
     model,
     nlags=None):
