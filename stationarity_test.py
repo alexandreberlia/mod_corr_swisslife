@@ -1,5 +1,5 @@
 from statsmodels.tsa.stattools import adfuller, kpss
-
+import pandas as pd
 
 def integration_order(
         series):
