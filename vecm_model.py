@@ -5,7 +5,7 @@ import pandas as pd
 def estimate_vecm(
         data,
         k_ar_diff,
-        coint_rank=1,
+        coint_rank,
         deterministic="ci",
         block_name="Unnamed Block"
 ):
