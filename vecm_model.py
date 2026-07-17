@@ -7,7 +7,7 @@ def estimate_vecm(
         k_ar_diff,
         coint_rank,
         deterministic="ci",
-        exog=dummy
+        exog=dummy,
         block_name="Unnamed Block"
 ):
 
