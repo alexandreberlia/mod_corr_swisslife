@@ -6,7 +6,8 @@ def estimate_var(
         data,
         lag,
         block_name="Unnamed Block",
-        deterministic="c"
+        deterministic="c",
+        exog=covid_dummy
 ):
 
     data = data.dropna()
