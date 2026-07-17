@@ -7,12 +7,12 @@ def estimate_var(
         lag,
         block_name="Unnamed Block",
         deterministic="c",
-        exog=dummy
+        exog=D
 ):
 
     data = data.dropna()
 
-    model = VAR(data)
+    model = VAR(data,exog=D)
 
     results = model.fit(
         maxlags=lag,
