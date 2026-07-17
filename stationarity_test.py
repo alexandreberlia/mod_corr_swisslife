@@ -55,34 +55,38 @@ def integration_order(
 
 
 def stationarity_report(
+        target="all",
         save_excel='no',
         excel_name='Stationarity_Report',
-        cell_width=75,
-        scope='block'):
-
+        cell_width=75):
+    
     results = []
 
-    if scope == 'block':
+    # Cas 1 : tous les DataFrames du dictionnaire
+    if target == "all":
 
         datasets = list(
             dict_of_df.items()
         )
 
-    elif scope == 'all':
-
-        all_df = pd.concat(
-            dict_of_df.values(),
-            axis=1
-        )
+    # Cas 2 : un DataFrame unique
+    elif isinstance(target, pd.DataFrame):
 
         datasets = [
-            ('FULL_DATASET', all_df)
+            ("CUSTOM_BLOCK", target)
         ]
+
+    # Cas 3 : dictionnaire de blocs
+    elif isinstance(target, dict):
+
+        datasets = list(
+            target.items()
+        )
 
     else:
 
         raise ValueError(
-            "scope must be 'block' or 'all'"
+            "target must be 'all', a DataFrame, or a dict of DataFrames."
         )
 
     for df_name, dataframe in datasets:
@@ -122,39 +126,39 @@ def stationarity_report(
                 kpss_stat = np.nan
                 kpss_p = np.nan
 
-            adf_stationary = (
-                adf_p < 0.05
-                if pd.notna(adf_p)
-                else np.nan
-            )
-
-            kpss_stationary = (
-                kpss_p > 0.05
-                if pd.notna(kpss_p)
-                else np.nan
-            )
-
             results.append({
 
                 "DataFrame": df_name,
+
                 "Variable": col,
 
                 "ADF Statistic": adf_stat,
+
                 "ADF p-value": adf_p,
-                "ADF Stationary": adf_stationary,
+
+                "ADF Stationary":
+                    adf_p < 0.05
+                    if pd.notna(adf_p)
+                    else np.nan,
 
                 "KPSS Statistic": kpss_stat,
+
                 "KPSS p-value": kpss_p,
-                "KPSS Stationary": kpss_stationary,
+
+                "KPSS Stationary":
+                    kpss_p > 0.05
+                    if pd.notna(kpss_p)
+                    else np.nan,
 
                 "Integration Order":
                     integration_order(series)
-
             })
 
-    results_df = pd.DataFrame(results)
+    results_df = pd.DataFrame(
+        results
+    )
 
-    if save_excel == 'yes':
+    if save_excel == "yes":
 
         results_df.to_excel(
             f"{excel_name}.xlsx",
@@ -175,48 +179,3 @@ def stationarity_report(
         )
 
     return results_df
-
-
-def stationarity_summary(
-        scope='block'):
-
-    df = stationarity_report(
-        scope=scope
-    )
-
-    summary = df[
-        [
-            "Variable",
-            "ADF p-value",
-            "KPSS p-value",
-            "Integration Order"
-        ]
-    ]
-
-    summary = summary.sort_values(
-        by="Integration Order"
-    )
-
-    return summary
-
-
-def print_stationarity_summary(
-        scope='block'):
-
-    summary = stationarity_summary(
-        scope=scope
-    )
-
-    print()
-    print("=" * 100)
-    print("STATIONARITY SUMMARY")
-    print("=" * 100)
-    print()
-
-    print(
-        summary.to_string(
-            index=False
-        )
-    )
-
-    return summary
