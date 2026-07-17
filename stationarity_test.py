@@ -1,51 +1,56 @@
 from statsmodels.tsa.stattools import adfuller, kpss
 import pandas as pd
 
-def integration_order(
-        series):
+import pandas as pd
+import numpy as np
 
-    series = pd.to_numeric(
-        series,
-        errors='coerce'
-    ).dropna()
+from statsmodels.tsa.stattools import (
+    adfuller,
+    kpss
+)
+
+
+def integration_order(series):
+
+    series = (
+        pd.to_numeric(
+            series,
+            errors="coerce"
+        )
+        .dropna()
+    )
 
     if len(series) < 30:
         return "Insufficient observations"
 
     try:
-
-        adf_level = adfuller(
+        if adfuller(
             series,
-            autolag='AIC'
-        )[1]
+            autolag="AIC"
+        )[1] < 0.05:
 
-        if adf_level < 0.05:
             return "I(0)"
 
     except Exception:
         pass
 
     try:
-
-        adf_diff1 = adfuller(
+        if adfuller(
             series.diff().dropna(),
-            autolag='AIC'
-        )[1]
+            autolag="AIC"
+        )[1] < 0.05:
 
-        if adf_diff1 < 0.05:
             return "I(1)"
 
     except Exception:
         pass
 
     try:
-
-        adf_diff2 = adfuller(
+        if adfuller(
             series.diff().diff().dropna(),
-            autolag='AIC'
-        )[1]
+            autolag="AIC"
+        )[1] < 0.05:
 
-        if adf_diff2 < 0.05:
             return "I(2)"
 
     except Exception:
@@ -54,48 +59,17 @@ def integration_order(
     return "> I(2)"
 
 
-def stationarity_report(
-        target="all",
-        save_excel='no',
-        excel_name='Stationarity_Report',
-        cell_width=75):
-    
+def stationarity_report():
+
     results = []
 
-    # Cas 1 : tous les DataFrames du dictionnaire
-    if target == "all":
-
-        datasets = list(
-            dict_of_df.items()
-        )
-
-    # Cas 2 : un DataFrame unique
-    elif isinstance(target, pd.DataFrame):
-
-        datasets = [
-            ("CUSTOM_BLOCK", target)
-        ]
-
-    # Cas 3 : dictionnaire de blocs
-    elif isinstance(target, dict):
-
-        datasets = list(
-            target.items()
-        )
-
-    else:
-
-        raise ValueError(
-            "target must be 'all', a DataFrame, or a dict of DataFrames."
-        )
-
-    for df_name, dataframe in datasets:
+    for df_name, dataframe in dict_of_df.items():
 
         for col in dataframe.columns:
 
             series = pd.to_numeric(
                 dataframe[col],
-                errors='coerce'
+                errors="coerce"
             ).dropna()
 
             if len(series) < 30:
@@ -103,9 +77,9 @@ def stationarity_report(
 
             try:
 
-                adf_stat, adf_p, _, _, _, _ = adfuller(
+                adf_stat, adf_p, *_ = adfuller(
                     series,
-                    autolag='AIC'
+                    autolag="AIC"
                 )
 
             except Exception:
@@ -115,10 +89,10 @@ def stationarity_report(
 
             try:
 
-                kpss_stat, kpss_p, _, _ = kpss(
+                kpss_stat, kpss_p, *_ = kpss(
                     series,
-                    regression='c',
-                    nlags='auto'
+                    regression="c",
+                    nlags="auto"
                 )
 
             except Exception:
@@ -152,30 +126,92 @@ def stationarity_report(
 
                 "Integration Order":
                     integration_order(series)
+
             })
 
-    results_df = pd.DataFrame(
-        results
-    )
+    return pd.DataFrame(results)
 
-    if save_excel == "yes":
 
-        results_df.to_excel(
-            f"{excel_name}.xlsx",
-            index=False
+def stationarity_block(
+        block,
+        block_name="Unnamed Block"):
+
+    if not isinstance(
+            block,
+            pd.DataFrame):
+
+        raise ValueError(
+            "block must be a DataFrame"
         )
 
-        wb = load_workbook(
-            f"{excel_name}.xlsx"
+    results = []
+
+    for col in block.columns:
+
+        series = (
+            pd.to_numeric(
+                block[col],
+                errors="coerce"
+            )
+            .dropna()
         )
 
-        adjust_dimensions(
-            wb,
-            max_column_width=cell_width
-        )
+        if len(series) < 30:
+            continue
 
-        wb.save(
-            f"{excel_name}.xlsx"
-        )
+        try:
 
-    return results_df
+            adf_stat, adf_p, *_ = adfuller(
+                series,
+                autolag="AIC"
+            )
+
+        except Exception:
+
+            adf_stat = np.nan
+            adf_p = np.nan
+
+        try:
+
+            kpss_stat, kpss_p, *_ = kpss(
+                series,
+                regression="c",
+                nlags="auto"
+            )
+
+        except Exception:
+
+            kpss_stat = np.nan
+            kpss_p = np.nan
+
+        results.append({
+
+            "Block": block_name,
+
+            "Variable": col,
+
+            "ADF Statistic": adf_stat,
+
+            "ADF p-value": adf_p,
+
+            "ADF Stationary":
+                adf_p < 0.05
+                if pd.notna(adf_p)
+                else np.nan,
+
+            "KPSS Statistic": kpss_stat,
+
+            "KPSS p-value": kpss_p,
+
+            "KPSS Stationary":
+                kpss_p > 0.05
+                if pd.notna(kpss_p)
+                else np.nan,
+
+            "Integration Order":
+                integration_order(
+                    series
+                )
+        })
+
+    return pd.DataFrame(results)
