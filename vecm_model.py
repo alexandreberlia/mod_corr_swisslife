@@ -7,7 +7,7 @@ def estimate_vecm(
         k_ar_diff,
         coint_rank,
         deterministic="ci",
-        exog=D,
+        exog=None,
         block_name="Unnamed Block"
 ):
 
@@ -18,7 +18,7 @@ def estimate_vecm(
         k_ar_diff=k_ar_diff,
         coint_rank=coint_rank,
         deterministic=deterministic,
-        exog=D
+        exog
     )
 
     results = model.fit()
