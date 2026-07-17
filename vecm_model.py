@@ -18,7 +18,7 @@ def estimate_vecm(
         k_ar_diff=k_ar_diff,
         coint_rank=coint_rank,
         deterministic=deterministic,
-        exog
+        exog=exog
     )
 
     results = model.fit()
