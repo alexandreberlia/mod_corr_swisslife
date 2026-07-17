@@ -9,10 +9,6 @@ def estimate_vecm(
         deterministic="ci",
         block_name="Unnamed Block"
 ):
-    johansen_t=johansen_test(data,
-                             k_ar_diff,
-                             block_name)
-    coint_rank=estimate_cointegration_rank(johansen_t)
 
     data = data.dropna()
 
