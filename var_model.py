@@ -12,7 +12,7 @@ def estimate_var(
 
     data = data.dropna()
 
-    model = VAR(data,exog)
+    model = VAR(data,exog=exog)
 
     results = model.fit(
         maxlags=lag,
