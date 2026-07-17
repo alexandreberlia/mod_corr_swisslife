@@ -165,3 +165,23 @@ def build_consumer_block(dict_of_df):
         ],
         axis=1
     ).dropna()
+
+def build_production_block(dict_of_df):
+
+    return pd.concat(
+        [
+            get_series(
+                "GDP US Chained Dollars YoY SA (GDP)",
+                dict_of_df
+            ),
+            get_series(
+                "US Industrial Production YOY S (Economic Dynamic)",
+                dict_of_df
+            ),
+            get_series(
+                "US Durable Goods New Orders To (Economic Dynamic)",
+                dict_of_df
+            )
+        ],
+        axis=1
+    ).dropna()
