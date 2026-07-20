@@ -669,7 +669,438 @@ En pratique :
         tout en respectant une relation économique de long terme ?"
 
 
-11. TESTS DE CAUSALITÉ DE GRANGER
+TESTS DE STABILITÉ, TESTS PORTMANTEAU ET TESTS DE ARCH
+-------------------------------------------------------
+
+Afin de s'assurer de la robustesse et significativité des modèles et de la fiabilité de leurs résulats pour un dataset donné, il est nécessaire de bien vérifier leur stabilité ainsi que la normalité et la non corrélation de leurs résidus. 
+
+1. TEST DE STABILITÉ D'UN VAR
+   
+   Un modèle VAR est dit stable lorsqu'un choc affectant le système aujourd'hui
+voit son impact diminuer progressivement au fil du temps, conduisant à un
+retour vers l'équilibre de long terme.
+
+Mathématiquement, la stabilité est assurée lorsque toutes les valeurs propres
+de la matrice compagnon sont à l'intérieur du cercle unité :
+
+    |λ| < 1
+
+Cependant, la fonction `roots` de Statsmodels ne renvoie pas directement les
+valeurs propres, mais leurs inverses. La condition de stabilité devient donc :
+
+    np.abs(var_results.roots) > 1
+
+Le modèle est considéré comme stable si toutes les racines retournées par
+Statsmodels ont un module strictement supérieur à 1.
+
+Exemple :
+
+    Root      Modulus
+    5.17      5.17
+    2.84      2.84
+    1.65      1.65
+    1.02      1.02
+
+Toutes les racines étant supérieures à 1, le système est stable.
+
+Un modèle stable permet une interprétation fiable des :
+
+    - fonctions de réponse impulsionnelle (IRF),
+    - décompositions de variance (FEVD),
+    - prévisions (Forecasting).
+
+À l'inverse, si au moins une racine possède un module inférieur ou égal à 1,
+les chocs peuvent ne pas se dissiper correctement, rendant l'interprétation
+économique du modèle plus délicate.
+
+2.VALIDATION D'UN VECM
+
+   Contrairement au VAR, la stabilité d'un VECM ne se résume pas à l'étude des
+racines du système.
+
+Un VECM est considéré comme correctement spécifié lorsque :
+
+    1. Les variables sont majoritairement I(1).
+    2. Le test de Johansen identifie au moins une relation de cointégration.
+    3. Le rang de cointégration utilisé dans le VECM est cohérent avec celui
+       estimé par le test de Johansen.
+    4. Les coefficients de correction d'erreur (alpha) sont présents,
+       traduisant un mécanisme de retour à l'équilibre.
+    5. Les résidus se comportent comme un bruit blanc
+       (Portmanteau/Hosking non rejeté).
+
+Un cas particulier mérite attention :
+
+    Rank = Nombre de variables
+
+Cela indique généralement que toutes les variables sont déjà stationnaires.
+Dans cette situation, un VAR est souvent plus approprié qu'un VECM.
+
+## 3. TEST PORTMANTEAU
+
+L'absence d'autocorrélation des résidus constitue une condition essentielle à la validité d'un modèle VAR ou VECM. Si les résidus demeurent autocorrélés après l'estimation, cela signifie qu'une partie de la dynamique temporelle des données n'a pas été capturée par le modèle.
+
+Soit :
+
+\[
+\hat{\varepsilon}_t
+\]
+
+le vecteur des résidus estimés.
+
+L'hypothèse nulle du test Portmanteau est :
+
+\[
+H_0 :
+E(\hat{\varepsilon}_t \hat{\varepsilon}_{t-h}^{\prime})=0
+\]
+
+pour tout :
+
+\[
+h = 1,\dots,m
+\]
+
+Autrement dit :
+
+> Les résidus forment un bruit blanc multivarié.
+
+La statistique de Portmanteau est :
+
+\[
+Q(m)
+=
+T
+\sum_{h=1}^{m}
+\text{tr}
+\left(
+\hat{C}_h^{\prime}
+\hat{C}_0^{-1}
+\hat{C}_h
+\hat{C}_0^{-1}
+\right)
+\]
+
+avec :
+
+\[
+\hat{C}_h
+=
+\frac{1}{T}
+\sum_{t=h+1}^{T}
+\hat{\varepsilon}_t
+\hat{\varepsilon}_{t-h}^{\prime}
+\]
+
+la matrice d'autocovariance résiduelle d'ordre \(h\).
+
+Sous l'hypothèse nulle :
+
+\[
+Q(m)
+\overset{a}{\sim}
+\chi^2
+\left(
+K^2(m-p)
+\right)
+\]
+
+où :
+
+- \(K\) est le nombre de variables du système ;
+- \(m\) est le nombre maximal de retards testés ;
+- \(p\) est l'ordre du VAR/VECM.
+
+### Interprétation
+
+Si :
+
+```text
+P-value > seuil de significativité
+```
+
+alors :
+
+```text
+On ne rejette pas H₀.
+```
+
+et les résidus peuvent être considérés comme un bruit blanc.
+
+À l'inverse :
+
+```text
+P-value < seuil de significativité
+```
+
+indique que des autocorrélations résiduelles persistent et que le modèle ne capture pas entièrement la dynamique des données.
+
+---
+
+## 4. TEST DE HOSKING
+
+Le test de Hosking constitue une version ajustée du test Portmanteau pour les systèmes multivariés.
+
+Le problème du Portmanteau classique est que les autocorrélations d'ordre élevé sont estimées sur un nombre plus faible d'observations. Lorsque :
+
+\[
+h
+\]
+
+augmente, seules :
+
+\[
+T-h
+\]
+
+observations demeurent disponibles pour estimer l'autocorrélation correspondante.
+
+Le test de Hosking corrige ce problème en pondérant chaque terme par :
+
+\[
+\frac{1}{T-h}
+\]
+
+La statistique devient alors :
+
+\[
+Q_H(m)
+=
+T^2
+\sum_{h=1}^{m}
+\frac{
+\text{tr}
+\left(
+\hat{C}_h^{\prime}
+\hat{C}_0^{-1}
+\hat{C}_h
+\hat{C}_0^{-1}
+\right)
+}
+{T-h}
+\]
+
+Cette correction réduit le risque de rejeter à tort l'hypothèse de bruit blanc.
+
+### Hypothèse testée
+
+\[
+H_0 :
+E(\hat{\varepsilon}_t \hat{\varepsilon}_{t-h}^{\prime})=0
+\]
+
+pour tout :
+
+\[
+h=1,\dots,m
+\]
+
+### Interprétation
+
+```text
+P-value élevée
+```
+
+↓
+
+```text
+Les résidus sont compatibles avec un bruit blanc multivarié.
+```
+
+Le test de Hosking est généralement considéré comme plus robuste que le Portmanteau classique lorsque :
+
+- le système contient plusieurs variables ;
+- le nombre de retards est élevé ;
+- l'échantillon est relativement limité.
+
+---
+
+## 5. TEST DE LI-MCLEOD
+
+Le test de Li-McLeod applique la logique du test de Hosking aux résidus au carré.
+
+L'objectif n'est plus de détecter une autocorrélation dans les résidus eux-mêmes mais dans leur variance.
+
+On définit :
+
+\[
+u_t
+=
+\hat{\varepsilon}_t^2
+\]
+
+et l'on applique alors un test Portmanteau au processus :
+
+\[
+u_t
+\]
+
+L'hypothèse nulle devient :
+
+\[
+H_0 :
+E(u_tu_{t-h})=0
+\]
+
+pour :
+
+\[
+h = 1,\dots,m
+\]
+
+Autrement dit :
+
+> Les résidus au carré ne présentent aucune dépendance temporelle.
+
+### Interprétation
+
+Si :
+
+```text
+P-value > seuil
+```
+
+↓
+
+```text
+Pas d'autocorrélation des résidus au carré.
+```
+
+Si :
+
+```text
+P-value < seuil
+```
+
+↓
+
+```text
+Présence d'effets de volatilité persistante.
+```
+
+Le test de Li-McLeod constitue souvent une première alerte en présence d'effets ARCH ou GARCH.
+
+---
+
+## 6. TEST ARCH (AUTOREGRESSIVE CONDITIONAL HETEROSKEDASTICITY)
+
+Un modèle peut produire des résidus non autocorrélés tout en conservant une variance dépendante du passé.
+
+Dans ce cas :
+
+\[
+\hat{\varepsilon}_t
+\]
+
+forme un bruit blanc mais :
+
+\[
+\hat{\varepsilon}_t^2
+\]
+
+reste autocorrélé.
+
+Ce phénomène apparaît fréquemment lors :
+
+- des crises financières ;
+- de la crise de 2008 ;
+- du choc COVID ;
+- des périodes de forte incertitude macroéconomique.
+
+### Hypothèses
+
+\[
+H_0 :
+Var(\hat{\varepsilon}_t|\mathcal{F}_{t-1})
+=
+\sigma^2
+\]
+
+Variance conditionnelle constante.
+
+Contre :
+
+\[
+H_1 :
+Var(\hat{\varepsilon}_t|\mathcal{F}_{t-1})
+\neq
+\sigma^2
+\]
+
+Présence d'effets ARCH.
+
+### Régression auxiliaire
+
+Le test repose sur :
+
+\[
+\hat{\varepsilon}_t^2
+=
+\alpha_0
++
+\alpha_1\hat{\varepsilon}_{t-1}^2
++
+\dots
++
+\alpha_q\hat{\varepsilon}_{t-q}^2
++
+u_t
+\]
+
+La statistique du test est :
+
+\[
+LM
+=
+T\times R^2
+\]
+
+où :
+
+- \(T\) est le nombre d'observations ;
+- \(R^2\) est le coefficient de détermination de la régression auxiliaire.
+
+Sous l'hypothèse nulle :
+
+\[
+LM
+\sim
+\chi^2(q)
+\]
+
+### Interprétation
+
+Si :
+
+```text
+P-value > seuil
+```
+
+↓
+
+```text
+Absence d'effet ARCH.
+```
+
+Si :
+
+```text
+P-value < seuil
+```
+
+↓
+
+```text
+Présence d'effets ARCH.
+```
+
+Cela signifie que les périodes de forte volatilité tendent à être suivies par d'autres périodes de forte volatilité, phénomène connu sous le nom de **volatility clustering**.
+
+      
+
+
+TEST DE CAUSALITÉ DE GRANGER
+--------------------------------
 
 Les tests de causalité de Granger permettent d'identifier les relations
 prédictives entre les variables d'un système VAR ou VECM.
@@ -692,7 +1123,7 @@ signifie :
     les retards de X apportent une information utile
     pour prévoir Y.
 
-12. CAUSALITÉ DE GRANGER DANS UN VAR
+1. CAUSALITÉ DE GRANGER DANS UN VAR
 
 Fonction :
 
@@ -754,7 +1185,7 @@ Interprétation :
     significative pour expliquer l'évolution future du PIB.
 
 
-13. CAUSALITÉ DE GRANGER DANS UN VECM
+2. CAUSALITÉ DE GRANGER DANS UN VECM
 
 Fonction :
 
@@ -807,7 +1238,7 @@ Conclusion :
     la prévision des ventes au détail.
 
 
-14. COMMENT INTERPRÉTER LES P-VALUES
+3. COMMENT INTERPRÉTER LES P-VALUES
 
 Hypothèse nulle :
 
@@ -850,7 +1281,7 @@ Interprétation :
     l'existence d'un contenu prédictif.
 
 
-15. COMMENT UTILISER LES RÉSULTATS
+4. COMMENT UTILISER LES RÉSULTATS
 
 Les résultats de Granger permettent :
 
@@ -882,7 +1313,7 @@ signifie :
     pour prévoir l'évolution du chômage.
 
 
-16. LIMITES DU TEST DE GRANGER
+5. LIMITES DU TEST DE GRANGER
 
 Le test ne démontre pas :
 
