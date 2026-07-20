@@ -738,223 +738,47 @@ Dans cette situation, un VAR est souvent plus approprié qu'un VECM.
 
 ## 3. TEST PORTMANTEAU
 
-L'absence d'autocorrélation des résidus constitue une condition essentielle à la validité d'un modèle VAR ou VECM. Si les résidus demeurent autocorrélés après l'estimation, cela signifie qu'une partie de la dynamique temporelle des données n'a pas été capturée par le modèle.
+L'absence d'autocorrélation des résidus constitue une condition essentielle à la validité d'un modèle VAR ou VECM. Si les résidus restent autocorrélés après l'estimation, cela signifie qu'une partie de la dynamique temporelle des données n'a pas été capturée par le modèle.
 
-Soit :
+### Hypothèse nulle
 
-\[
-\hat{\varepsilon}_t
-\]
-
-le vecteur des résidus estimés.
-
-L'hypothèse nulle du test Portmanteau est :
-
-\[
-H_0 :
-E(\hat{\varepsilon}_t \hat{\varepsilon}_{t-h}^{\prime})=0
-\]
-
-pour tout :
-
-\[
-h = 1,\dots,m
-\]
+H0 : les résidus ne sont pas autocorrélés jusqu'au retard h.
 
 Autrement dit :
 
-> Les résidus forment un bruit blanc multivarié.
+```text
+E(εt ε't-k) = 0
+pour tout k = 1,...,h
+```
 
-La statistique de Portmanteau est :
+### Statistique de test
 
-\[
-Q(m)
+Le test repose sur la somme des autocorrélations croisées des résidus :
+
+```text
+Q(h)
 =
-T
-\sum_{h=1}^{m}
-\text{tr}
-\left(
-\hat{C}_h^{\prime}
-\hat{C}_0^{-1}
-\hat{C}_h
-\hat{C}_0^{-1}
-\right)
-\]
-
-avec :
-
-\[
-\hat{C}_h
-=
-\frac{1}{T}
-\sum_{t=h+1}^{T}
-\hat{\varepsilon}_t
-\hat{\varepsilon}_{t-h}^{\prime}
-\]
-
-la matrice d'autocovariance résiduelle d'ordre \(h\).
-
-Sous l'hypothèse nulle :
-
-\[
-Q(m)
-\overset{a}{\sim}
-\chi^2
-\left(
-K^2(m-p)
-\right)
-\]
+T × Σ tr(Ck' C0⁻¹ Ck C0⁻¹)
+```
 
 où :
 
-- \(K\) est le nombre de variables du système ;
-- \(m\) est le nombre maximal de retards testés ;
-- \(p\) est l'ordre du VAR/VECM.
+- T = nombre d'observations ;
+- Ck = matrice d'autocovariance résiduelle d'ordre k ;
+- h = horizon maximal testé.
+
+Sous H0 :
+
+```text
+Q(h) ~ χ²(K²(h-p))
+```
+
+avec :
+
+- K = nombre de variables ;
+- p = nombre de retards du modèle.
 
 ### Interprétation
-
-Si :
-
-```text
-P-value > seuil de significativité
-```
-
-alors :
-
-```text
-On ne rejette pas H₀.
-```
-
-et les résidus peuvent être considérés comme un bruit blanc.
-
-À l'inverse :
-
-```text
-P-value < seuil de significativité
-```
-
-indique que des autocorrélations résiduelles persistent et que le modèle ne capture pas entièrement la dynamique des données.
-
----
-
-## 4. TEST DE HOSKING
-
-Le test de Hosking constitue une version ajustée du test Portmanteau pour les systèmes multivariés.
-
-Le problème du Portmanteau classique est que les autocorrélations d'ordre élevé sont estimées sur un nombre plus faible d'observations. Lorsque :
-
-\[
-h
-\]
-
-augmente, seules :
-
-\[
-T-h
-\]
-
-observations demeurent disponibles pour estimer l'autocorrélation correspondante.
-
-Le test de Hosking corrige ce problème en pondérant chaque terme par :
-
-\[
-\frac{1}{T-h}
-\]
-
-La statistique devient alors :
-
-\[
-Q_H(m)
-=
-T^2
-\sum_{h=1}^{m}
-\frac{
-\text{tr}
-\left(
-\hat{C}_h^{\prime}
-\hat{C}_0^{-1}
-\hat{C}_h
-\hat{C}_0^{-1}
-\right)
-}
-{T-h}
-\]
-
-Cette correction réduit le risque de rejeter à tort l'hypothèse de bruit blanc.
-
-### Hypothèse testée
-
-\[
-H_0 :
-E(\hat{\varepsilon}_t \hat{\varepsilon}_{t-h}^{\prime})=0
-\]
-
-pour tout :
-
-\[
-h=1,\dots,m
-\]
-
-### Interprétation
-
-```text
-P-value élevée
-```
-
-↓
-
-```text
-Les résidus sont compatibles avec un bruit blanc multivarié.
-```
-
-Le test de Hosking est généralement considéré comme plus robuste que le Portmanteau classique lorsque :
-
-- le système contient plusieurs variables ;
-- le nombre de retards est élevé ;
-- l'échantillon est relativement limité.
-
----
-
-## 5. TEST DE LI-MCLEOD
-
-Le test de Li-McLeod applique la logique du test de Hosking aux résidus au carré.
-
-L'objectif n'est plus de détecter une autocorrélation dans les résidus eux-mêmes mais dans leur variance.
-
-On définit :
-
-\[
-u_t
-=
-\hat{\varepsilon}_t^2
-\]
-
-et l'on applique alors un test Portmanteau au processus :
-
-\[
-u_t
-\]
-
-L'hypothèse nulle devient :
-
-\[
-H_0 :
-E(u_tu_{t-h})=0
-\]
-
-pour :
-
-\[
-h = 1,\dots,m
-\]
-
-Autrement dit :
-
-> Les résidus au carré ne présentent aucune dépendance temporelle.
-
-### Interprétation
-
-Si :
 
 ```text
 P-value > seuil
@@ -963,10 +787,16 @@ P-value > seuil
 ↓
 
 ```text
-Pas d'autocorrélation des résidus au carré.
+On ne rejette pas H0.
 ```
 
-Si :
+↓
+
+```text
+Les résidus sont assimilables à un bruit blanc.
+```
+
+À l'inverse :
 
 ```text
 P-value < seuil
@@ -975,102 +805,162 @@ P-value < seuil
 ↓
 
 ```text
-Présence d'effets de volatilité persistante.
+Des autocorrélations résiduelles persistent.
 ```
 
-Le test de Li-McLeod constitue souvent une première alerte en présence d'effets ARCH ou GARCH.
+---
+
+## 4. TEST DE HOSKING
+
+Le test de Hosking est une version ajustée du test Portmanteau adaptée aux systèmes multivariés.
+
+Le Portmanteau classique sous-pondère les autocorrélations d'ordre élevé puisque seules :
+
+```text
+T - h
+```
+
+observations sont disponibles pour les estimer.
+
+Hosking corrige ce biais en appliquant une pondération spécifique à chaque retard :
+
+```text
+QH(h)
+=
+T² × Σ [ tr(Ck' C0⁻¹ Ck C0⁻¹) / (T-k) ]
+```
+
+### Hypothèse nulle
+
+```text
+H0 :
+Absence d'autocorrélation résiduelle.
+```
+
+### Interprétation
+
+```text
+P-value > seuil
+```
+
+↓
+
+```text
+Les résidus sont compatibles avec un bruit blanc multivarié.
+```
+
+Le test de Hosking est généralement plus robuste que le Portmanteau classique lorsque :
+
+- le nombre de variables est élevé ;
+- le nombre de retards est important ;
+- l'échantillon est de taille limitée.
+
+---
+
+## 5. TEST DE LI-MCLEOD
+
+Le test de Li-McLeod applique le principe du Portmanteau aux résidus au carré.
+
+On teste alors :
+
+```text
+ut = εt²
+```
+
+au lieu de :
+
+```text
+εt
+```
+
+### Hypothèse nulle
+
+```text
+H0 :
+Absence d'autocorrélation des résidus au carré.
+```
+
+### Objectif
+
+Détecter une dépendance dans la volatilité du processus.
+
+Une p-value faible indique souvent :
+
+```text
+Présence potentielle d'effets ARCH/GARCH.
+```
 
 ---
 
 ## 6. TEST ARCH (AUTOREGRESSIVE CONDITIONAL HETEROSKEDASTICITY)
 
-Un modèle peut produire des résidus non autocorrélés tout en conservant une variance dépendante du passé.
+Un modèle peut produire des résidus non autocorrélés tout en présentant une variance dépendante du passé.
 
 Dans ce cas :
 
-\[
-\hat{\varepsilon}_t
-\]
+```text
+εt
+```
 
-forme un bruit blanc mais :
+est un bruit blanc mais :
 
-\[
-\hat{\varepsilon}_t^2
-\]
+```text
+εt²
+```
 
 reste autocorrélé.
 
-Ce phénomène apparaît fréquemment lors :
-
-- des crises financières ;
-- de la crise de 2008 ;
-- du choc COVID ;
-- des périodes de forte incertitude macroéconomique.
-
 ### Hypothèses
 
-\[
-H_0 :
-Var(\hat{\varepsilon}_t|\mathcal{F}_{t-1})
-=
-\sigma^2
-\]
+```text
+H0 :
+Variance conditionnelle constante
+(homoscédasticité)
+```
 
-Variance conditionnelle constante.
+contre :
 
-Contre :
-
-\[
-H_1 :
-Var(\hat{\varepsilon}_t|\mathcal{F}_{t-1})
-\neq
-\sigma^2
-\]
-
-Présence d'effets ARCH.
+```text
+H1 :
+Présence d'effets ARCH
+```
 
 ### Régression auxiliaire
 
 Le test repose sur :
 
-\[
-\hat{\varepsilon}_t^2
+```text
+εt²
 =
-\alpha_0
+α0
 +
-\alpha_1\hat{\varepsilon}_{t-1}^2
+α1 ε²t-1
 +
-\dots
+...
 +
-\alpha_q\hat{\varepsilon}_{t-q}^2
+αq ε²t-q
 +
-u_t
-\]
+ut
+```
 
-La statistique du test est :
+La statistique de test est :
 
-\[
-LM
-=
-T\times R^2
-\]
+```text
+LM = T × R²
+```
 
 où :
 
-- \(T\) est le nombre d'observations ;
-- \(R^2\) est le coefficient de détermination de la régression auxiliaire.
+- T est le nombre d'observations ;
+- R² est obtenu à partir de la régression auxiliaire.
 
-Sous l'hypothèse nulle :
+Sous H0 :
 
-\[
-LM
-\sim
-\chi^2(q)
-\]
+```text
+LM ~ χ²(q)
+```
 
 ### Interprétation
-
-Si :
 
 ```text
 P-value > seuil
@@ -1082,8 +972,6 @@ P-value > seuil
 Absence d'effet ARCH.
 ```
 
-Si :
-
 ```text
 P-value < seuil
 ```
@@ -1094,7 +982,8 @@ P-value < seuil
 Présence d'effets ARCH.
 ```
 
-Cela signifie que les périodes de forte volatilité tendent à être suivies par d'autres périodes de forte volatilité, phénomène connu sous le nom de **volatility clustering**.
+Cela signifie que les périodes de forte volatilité tendent à être suivies d'autres périodes de forte volatilité, phénomène connu sous le nom de **volatility clustering**.
+
 
       
 
