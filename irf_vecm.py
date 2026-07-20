@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 def compute_irf_vecm(
         vecm_results,
         periods=24):
-    return vecm_results.irf(periods)
+    return vecm_results.orth_irfs(periods)
 
 def plot_irf_vecm(
         vecm_results,
@@ -13,7 +13,7 @@ def plot_irf_vecm(
     Plot all impulse response functions.
     """
 
-    irf = vecm_results.irf(periods)
+    irf = vecm_results.orth_irfs(periods)
 
     irf.plot(
         orth=False
@@ -33,7 +33,7 @@ def plot_single_irf_vecm(
     Plot a single impulse response.
     """
 
-    irf = vecm_results.irf(periods)
+    irf = vecm_results.orth_irfs(periods)
 
     irf.plot(
         impulse=impulse,
@@ -52,7 +52,7 @@ def irf_dataframe_vecm(
     Export IRF values as DataFrame.
     """
 
-    irf = vecm_results.irf(periods)
+    irf = vecm_results.orth_irfs(periods)
 
     variables = vecm_results.names
 
