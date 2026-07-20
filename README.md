@@ -736,7 +736,133 @@ Un cas particulier mérite attention :
 Cela indique généralement que toutes les variables sont déjà stationnaires.
 Dans cette situation, un VAR est souvent plus approprié qu'un VECM.
 
-## 3. TEST PORTMANTEAU
+La fonction dédiée est :
+
+```python
+vecm_portmanteau_test()
+```
+
+### Utilisation
+
+```python
+consumer_portmanteau = vecm_portmanteau_test(
+    vecm_results=consumer_vecm,
+    nlags=30,
+    k_ar_diff=15
+)
+```
+
+La fonction :
+
+1. récupère les résidus du VECM ;
+2. construit un DataFrame avec les noms des variables ;
+3. applique le test multivarié de Hosking ;
+4. ajuste les degrés de liberté à partir de l’ordre du VAR sous-jacent.
+
+Le résultat est un dictionnaire contenant notamment :
+
+```python
+consumer_portmanteau["pvalue"]
+```
+
+---
+
+## 11. Rapport de validation d’un VECM
+
+La fonction :
+
+```python
+vecm_validation_report()
+```
+
+regroupe les principaux critères nécessaires à la validation d’un VECM.
+
+### Étape 1 : test de Johansen
+
+```python
+consumer_johansen = johansen_summary(
+    data=consumer_block,
+    k_ar_diff=15,
+    block_name="Consumer Block"
+)
+```
+
+### Étape 2 : estimation du VECM
+
+```python
+consumer_vecm = estimate_vecm(
+    data=consumer_block,
+    k_ar_diff=15,
+    coint_rank=consumer_johansen["rank"],
+    block_name="Consumer Block"
+)
+```
+
+### Étape 3 : Portmanteau multivarié
+
+```python
+consumer_portmanteau = vecm_portmanteau_test(
+    vecm_results=consumer_vecm,
+    nlags=30,
+    k_ar_diff=15
+)
+```
+
+### Étape 4 : rapport de validation
+
+```python
+consumer_validation = vecm_validation_report(
+    vecm_results=consumer_vecm,
+    johansen_results=consumer_johansen,
+    portmanteau_results=consumer_portmanteau,
+    alpha_signif=0.05
+)
+```
+
+### Diagnostics vérifiés
+
+#### Valid Cointegration Rank
+
+Le rang doit satisfaire :
+
+```text
+0 < r < K
+```
+
+Si :
+
+```text
+r = 0
+```
+
+aucune relation de cointégration n’est détectée.
+
+Si :
+
+```text
+r = K
+```
+
+le système est de rang plein et les variables sont déjà stationnaires. Un VAR en niveau est alors généralement plus approprié.
+
+#### Johansen Consistency
+
+Le rang utilisé dans le VECM doit être identique au rang estimé par le test de Johansen.
+
+#### Error Correction Mechanism
+
+Au moins un coefficient d’ajustement `alpha` doit être statistiquement significatif.
+
+Cela montre qu’au moins une variable participe au retour vers l’équilibre de long terme.
+
+#### Residual Whiteness
+
+La p-value du Portmanteau multivarié doit être supérieure au seuil de significativité.
+
+---
+
+
+3. TEST PORTMANTEAU
 
 L'absence d'autocorrélation des résidus constitue une condition essentielle à la validité d'un modèle VAR ou VECM. Si les résidus restent autocorrélés après l'estimation, cela signifie qu'une partie de la dynamique temporelle des données n'a pas été capturée par le modèle.
 
@@ -753,35 +879,17 @@ pour tout k = 1,...,h
 
 ### Statistique de test
 
-Le test repose sur la somme des autocorrélations croisées des résidus :
+Le test repose sur la somme des autocorrélations croisées des résidus.
 
-```text
-Q(h)
-=
-T × Σ tr(Ck' C0⁻¹ Ck C0⁻¹)
-```
-
-où :
-
-- T = nombre d'observations ;
-- Ck = matrice d'autocovariance résiduelle d'ordre k ;
-- h = horizon maximal testé.
-
-Sous H0 :
-
-```text
 Q(h) ~ χ²(K²(h-p))
 ```
-
 avec :
 
 - K = nombre de variables ;
 - p = nombre de retards du modèle.
 
-### Interprétation
-
 ```text
-P-value > seuil
+statistique < valeur critique d'une χ²(K²(h-p))
 ```
 
 ↓
@@ -799,7 +907,7 @@ Les résidus sont assimilables à un bruit blanc.
 À l'inverse :
 
 ```text
-P-value < seuil
+statistique > valeur critique d'une χ²(K²(h-p))
 ```
 
 ↓
@@ -808,9 +916,68 @@ P-value < seuil
 Des autocorrélations résiduelles persistent.
 ```
 
+
+La fonction :
+
+```python
+portmanteau_test()
+```
+
+utilise directement la méthode `test_whiteness()` de Statsmodels.
+
+### Utilisation
+
+```python
+portmanteau_results = portmanteau_test(
+    model=production_var,
+    nlags=24,
+    adjusted=True
+)
+```
+
+L’hypothèse nulle est :
+
+```text
+H0 : absence d’autocorrélation résiduelle jusqu’à l’horizon testé
+```
+
+### Interprétation
+
+Si :
+
+```text
+P-value > 5 %
+```
+
+alors l’hypothèse nulle n’est pas rejetée :
+
+```text
+les résidus sont compatibles avec un bruit blanc.
+```
+
+Si :
+
+```text
+P-value < 5 %
+```
+
+alors l’hypothèse nulle est rejetée :
+
+```text
+des autocorrélations résiduelles persistent.
+```
+
+L’horizon doit respecter :
+
+```text
+nlags > p
+```
+
+où `p` est l’ordre du VAR.
+
 ---
 
-## 4. TEST DE HOSKING
+4. TEST DE HOSKING
 
 Le test de Hosking est une version ajustée du test Portmanteau adaptée aux systèmes multivariés.
 
@@ -820,15 +987,10 @@ Le Portmanteau classique sous-pondère les autocorrélations d'ordre élevé pui
 T - h
 ```
 
-observations sont disponibles pour les estimer.
+observations sont disponibles pour les estimer. La statistique est ainsi trop petite en moyenne. 
 
-Hosking corrige ce biais en appliquant une pondération spécifique à chaque retard :
+Hosking corrige ce biais en appliquant une pondération spécifique à chaque retard.
 
-```text
-QH(h)
-=
-T² × Σ [ tr(Ck' C0⁻¹ Ck C0⁻¹) / (T-k) ]
-```
 
 ### Hypothèse nulle
 
@@ -840,7 +1002,7 @@ Absence d'autocorrélation résiduelle.
 ### Interprétation
 
 ```text
-P-value > seuil
+statistique < valeur critique d'une χ²(K²(h-p))
 ```
 
 ↓
@@ -855,23 +1017,110 @@ Le test de Hosking est généralement plus robuste que le Portmanteau classique 
 - le nombre de retards est important ;
 - l'échantillon est de taille limitée.
 
+
+
+La fonction :
+
+```python
+hosking_portmanteau()
+```
+
+applique un test Portmanteau multivarié directement aux résidus du modèle.
+
+### Pour un VAR
+
+```python
+hosking_results = hosking_portmanteau(
+    residuals=production_var.resid,
+    nlags=24,
+    n_model_lags=production_var.k_ar,
+    adjusted=True
+)
+```
+
+### Pour un VECM
+
+Il est préférable d’utiliser le wrapper dédié :
+
+```python
+vecm_hosking_results = vecm_portmanteau_test(
+    vecm_results=consumer_vecm,
+    nlags=24,
+    k_ar_diff=15
+)
+```
+
+Dans le cas d’un VECM :
+
+```text
+p = k_ar_diff + 1
+```
+
+correspond à l’ordre du VAR sous-jacent.
+
+Par conséquent, il faut respecter :
+
+```text
+nlags > k_ar_diff + 1
+```
+
+Par exemple, pour :
+
+```text
+k_ar_diff = 15
+```
+
+utiliser :
+
+```python
+vecm_portmanteau_test(
+    consumer_vecm,
+    nlags=30,
+    k_ar_diff=15
+)
+```
+
+### Résultat retourné
+
+La fonction renvoie un dictionnaire :
+
+```python
+{
+    "Q": ...,
+    "df": ...,
+    "pvalue": ...,
+    "nlags": ...,
+    "n_model_lags": ...,
+    "adjusted": ...
+}
+```
+
+Pour récupérer uniquement la p-value :
+
+```python
+hosking_results["pvalue"]
+```
+
+### Interprétation
+
+```text
+P-value > 5 %
+```
+
+indique que les résidus peuvent être assimilés à un bruit blanc multivarié.
+
+```text
+P-value < 5 %
+```
+
+indique que le modèle laisse subsister une structure temporelle dans les résidus.
+
 ---
 
-## 5. TEST DE LI-MCLEOD
+5. TEST DE LI-MCLEOD
 
 Le test de Li-McLeod applique le principe du Portmanteau aux résidus au carré.
 
-On teste alors :
-
-```text
-ut = εt²
-```
-
-au lieu de :
-
-```text
-εt
-```
 
 ### Hypothèse nulle
 
@@ -890,9 +1139,116 @@ Une p-value faible indique souvent :
 Présence potentielle d'effets ARCH/GARCH.
 ```
 
+
+```python
+li_mcleod_portmanteau()
+```
+
+applique la correction additive de Li-McLeod au test Portmanteau multivarié.
+
+### Utilisation avec un VAR
+
+```python
+li_mcleod_results = li_mcleod_portmanteau(
+    residuals=production_var.resid,
+    nlags=24,
+    n_model_lags=production_var.k_ar
+)
+```
+
+### Utilisation avec un VECM
+
+```python
+li_mcleod_results = li_mcleod_portmanteau(
+    residuals=consumer_vecm.resid,
+    nlags=30,
+    n_model_lags=consumer_vecm.k_ar
+)
+```
+
+L’hypothèse nulle est :
+
+```text
+H0 : absence d’autocorrélation multivariée dans les résidus en niveau
+```
+
+### Interprétation
+
+```text
+P-value > 5 %
+```
+
+indique que les résidus sont compatibles avec un bruit blanc.
+
+```text
+P-value < 5 %
+```
+
+indique la présence d’autocorrélation résiduelle.
+
+Le test de Li-McLeod sur les niveaux ne doit pas être confondu avec le test de McLeod-Li sur les résidus au carré.
+
 ---
 
-## 6. TEST ARCH (AUTOREGRESSIVE CONDITIONAL HETEROSKEDASTICITY)
+6. COMPARAISON DES TESTS PORTMANTEAU
+7. 
+a fonction :
+
+```python
+compare_portmanteau()
+```
+
+compare plusieurs versions du test sur les mêmes résidus et avec le même horizon.
+
+### Utilisation
+
+```python
+comparison_table = compare_portmanteau(
+    model=production_var,
+    nlags=24
+)
+```
+
+Cette fonction compare :
+
+- le Portmanteau brut de Statsmodels ;
+- le Portmanteau ajusté de Statsmodels ;
+- la version Hosking brute développée dans le module ;
+- la version Hosking ajustée ;
+- la correction additive de Li-McLeod.
+
+Le tableau produit contient :
+
+```text
+Test
+Stat
+P-value
+```
+
+### Contrôle de cohérence
+
+Les implémentations internes et celles de Statsmodels doivent produire des résultats proches lorsqu’elles utilisent :
+
+- les mêmes résidus ;
+- le même horizon ;
+- les mêmes degrés de liberté ;
+- la même correction.
+
+Une différence très importante entre les résultats peut signaler :
+
+- un horizon incorrect ;
+- une mauvaise valeur de `n_model_lags` ;
+- une différence de correction ;
+- un problème d’implémentation.
+
+Le paramètre doit respecter :
+
+```text
+nlags > model.k_ar
+```
+
+
+7. TEST ARCH (AUTOREGRESSIVE CONDITIONAL HETEROSKEDASTICITY)
 
 Un modèle peut produire des résidus non autocorrélés tout en présentant une variance dépendante du passé.
 
@@ -984,6 +1340,182 @@ Présence d'effets ARCH.
 
 Cela signifie que les périodes de forte volatilité tendent à être suivies d'autres périodes de forte volatilité, phénomène connu sous le nom de **volatility clustering**.
 
+
+La fonction :
+
+```python
+arch_test()
+```
+
+applique le test ARCH-LM d’Engle séparément à chaque équation du système.
+
+### Pour un VAR
+
+```python
+arch_results = arch_test(
+    residuals=production_var.resid,
+    names=production_var.names,
+    nlags=4
+)
+```
+
+### Pour un VECM
+
+```python
+arch_results = arch_test(
+    residuals=consumer_vecm.resid,
+    names=consumer_vecm.names,
+    nlags=4
+)
+```
+
+L’hypothèse nulle est :
+
+```text
+H0 : absence d’effet ARCH
+```
+
+c’est-à-dire :
+
+```text
+variance conditionnelle constante.
+```
+
+### Interprétation
+
+```text
+P-value > 5 %
+```
+
+indique l’absence d’effet ARCH détectable.
+
+```text
+P-value < 5 %
+```
+
+indique que la variance des résidus dépend de leur passé.
+
+La colonne :
+
+```text
+No ARCH
+```
+
+indique directement le résultat du test pour chaque équation.
+
+
+---
+
+## 8. Test de McLeod-Li sur les résidus au carré
+
+La fonction :
+
+```python
+mcleod_li_arch_test()
+```
+
+applique un Portmanteau multivarié aux résidus au carré.
+
+### Pour un VAR
+
+```python
+mcleod_li_results = mcleod_li_arch_test(
+    residuals=production_var.resid,
+    nlags=12
+)
+```
+
+### Pour un VECM
+
+```python
+mcleod_li_results = mcleod_li_arch_test(
+    residuals=consumer_vecm.resid,
+    nlags=12
+)
+```
+
+Ce test cherche une dépendance temporelle dans :
+
+```text
+epsilon_t²
+```
+
+et non directement dans :
+
+```text
+epsilon_t
+```
+
+L’hypothèse nulle est :
+
+```text
+H0 : absence d’autocorrélation dans les résidus au carré
+```
+
+### Interprétation
+
+```text
+P-value > 5 %
+```
+
+indique qu’aucune dynamique de volatilité significative n’est détectée.
+
+```text
+P-value < 5 %
+```
+
+indique la présence potentielle d’effets ARCH ou GARCH.
+
+---
+
+## 9. Test de normalité
+
+La fonction :
+
+```python
+normality_test()
+```
+
+applique le test multivarié de normalité disponible dans Statsmodels.
+
+### Utilisation
+
+```python
+normality_results = normality_test(
+    production_var
+)
+```
+
+L’hypothèse nulle est :
+
+```text
+H0 : les résidus suivent une distribution normale multivariée
+```
+
+### Interprétation
+
+```text
+P-value > 5 %
+```
+
+indique que la normalité des résidus n’est pas rejetée.
+
+```text
+P-value < 5 %
+```
+
+indique que les résidus s’écartent significativement d’une distribution normale.
+
+Le rejet de la normalité est fréquent sur des données macroéconomiques et financières, notamment en présence de :
+
+- crises ;
+- valeurs extrêmes ;
+- asymétrie ;
+- queues épaisses.
+
+Il ne rend pas automatiquement le modèle inutilisable, mais invite à interpréter avec prudence les intervalles de confiance classiques.
+
+---
 
       
 
