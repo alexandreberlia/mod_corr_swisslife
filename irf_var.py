@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 def compute_irf_var(
         var_results,
         periods=24):
-    return var_results.irf(periods)
+    return var_results.orth_irfs(periods)
 
 def plot_irf_var(
         var_results,
@@ -14,7 +14,7 @@ def plot_irf_var(
     Plot all impulse response functions.
     """
 
-    irf = var_results.irf(periods)
+    irf = var_results.orth_irfs(periods)
 
     irf.plot(
         orth=False
@@ -34,7 +34,7 @@ def plot_single_irf_var(
     Plot a single impulse response.
     """
 
-    irf = var_results.irf(periods)
+    irf = var_results.orth_irfs(periods)
 
     irf.plot(
         impulse=impulse,
@@ -53,7 +53,7 @@ def irf_dataframe_var(
     Export IRF values as DataFrame.
     """
 
-    irf = var_results.irf(periods)
+    irf = var_results.orth_irfs(periods)
 
     variables = var_results.names
 
