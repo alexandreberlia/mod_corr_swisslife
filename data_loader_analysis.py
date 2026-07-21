@@ -70,9 +70,8 @@ def generate_dataframes(df):
         if new_df.empty:
             break
 
-df = convert_date_columns(df)
-
-generate_dataframes(df)
+df_work = convert_date_columns(df_work)
+generate_dataframes(df_work)
 df_original = pd.read_csv(
     "corrected_file.csv"
 )
