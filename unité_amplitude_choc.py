@@ -20,13 +20,11 @@ def inferer_unite_bloomberg(nom):
 
     if any(token in nom_upper for token in tokens_pourcentage):
         return "pourcentage / points de pourcentage"
-
     if "NFP TCH" in nom_upper:
         return "milliers d'emplois"
 
     if "ADP CHNG" in nom_upper:
         return "milliers d'emplois"
-
     tokens_pmi = [
         "PMI",
         "NAPM"
@@ -34,7 +32,6 @@ def inferer_unite_bloomberg(nom):
 
     if any(token in nom_upper for token in tokens_pmi):
         return "points d'indice PMI"
-
     tokens_indices = [
         "CONCCONF",
         "CONSSENT",
@@ -48,7 +45,6 @@ def inferer_unite_bloomberg(nom):
 
     if any(token in nom_upper for token in tokens_indices):
         return "points d'indice"
-
     if "NHSPATOT" in nom_upper:
         return "milliers de logements, rythme annualisé"
 
@@ -57,8 +53,6 @@ def inferer_unite_bloomberg(nom):
 
     if "SAARTOTL" in nom_upper:
         return "millions de véhicules, rythme annualisé"
-
-
     if "XAU" in nom_upper:
         return "dollars US par once troy"
 
@@ -98,103 +92,180 @@ def inferer_unite_bloomberg(nom):
 
     return "unité non identifiée"
 
-def tableau_unites_irf(
+
+def resume_unites_irf(
+    model_result,
     data,
-    vecm_result=None,
     transformations=None,
-    unites_personnalisees=None
+    unites=None,
+    type_modele="auto"
 ):
 
     if not isinstance(data, pd.DataFrame):
         raise TypeError("data doit être une DataFrame pandas.")
 
     transformations = transformations or {}
-    unites_personnalisees = unites_personnalisees or {}
+    unites = unites or {}
 
-    variables = data.columns.tolist()
-    ecart_type_donnees = data.std(ddof=1)
-    if vecm_result is not None:
-        sigma_u = np.asarray(vecm_result.sigma_u)
+    variables = list(data.columns)
+    n = len(variables)
+    if type_modele == "auto":
+        nom_classe = model_result.__class__.__name__.upper()
 
-        if sigma_u.shape != (len(variables), len(variables)):
-            raise ValueError(
-                f"sigma_u a la dimension {sigma_u.shape}, "
-                f"mais {len(variables)} variables sont présentes."
-            )
+        if "VECM" in nom_classe:
+            type_modele = "VECM"
+        elif "VAR" in nom_classe:
+            type_modele = "VAR"
+        else:
+            type_modele = "modèle multivarié"
+    sigma_u = np.asarray(model_result.sigma_u, dtype=float)
 
-        ecart_type_choc = np.sqrt(np.diag(sigma_u))
+    if sigma_u.shape != (n, n):
+        raise ValueError(
+            f"sigma_u a la dimension {sigma_u.shape}, "
+            f"mais les données contiennent {n} variables."
+        )
 
-    else:
-        ecart_type_choc = np.full(len(variables), np.nan)
+    # Écart-type des innovations réduites
+    std_residus = np.sqrt(np.diag(sigma_u))
 
+    # Matrice d'impact contemporain de Cholesky
+    P = np.linalg.cholesky(sigma_u)
+
+    # Impact propre du choc de Cholesky
+    impact_propre = np.diag(P)
+
+    # Écart-type historique des données du modèle
+    std_historique = data.std(ddof=1).to_numpy()
     lignes = []
 
     for i, variable in enumerate(variables):
 
-        transformation = transformations.get(variable, "niveau")
-
-        unite_originale = unites_personnalisees.get(
+        transformation = transformations.get(variable, "niveau")   
+        unite_originale = unites.get(
             variable,
             inferer_unite_bloomberg(variable)
         )
+
+
+        sigma_reduit = std_residus[i]
+        choc_cholesky = impact_propre[i]
+
         if transformation == "niveau":
+
             unite_modele = unite_originale
-            interpretation = (
-                f"Un choc d'un écart-type correspond à "
-                f"{ecart_type_choc.4f} {unite_originale}"
+
+            interpretation_reduite = (
+                f"1 sigma résiduel = {sigma_reduit:.4f} "
+                f"{unite_originale}"
+            )
+
+            interpretation_cholesky = (
+                f"Impact propre du choc orthogonal = "
+                f"{choc_cholesky:.4f} {unite_originale}"
             )
 
         elif transformation == "difference":
+
             unite_modele = f"variation en {unite_originale}"
-            interpretation = (
-                f"Un choc d'un écart-type correspond à une variation de "
-                f"{ecart_type_choc.4f} {unite_originale}"
+
+            interpretation_reduite = (
+                f"1 sigma résiduel = variation de "
+                f"{sigma_reduit:.4f} {unite_originale}"
+            )
+
+            interpretation_cholesky = (
+                f"Impact propre du choc orthogonal = variation de "
+                f"{choc_cholesky:.4f} {unite_originale}"
             )
 
         elif transformation == "log":
-            unite_modele = "logarithme du niveau"
-            variation_pct = 100 * (np.exp(ecart_type_choc[i]) - 1)
 
-            interpretation = (
-                f"Un choc d'un écart-type correspond approximativement "
-                f"à une variation de {variation_pct:.2f} % du niveau"
+            unite_modele = "logarithme du niveau"
+
+            sigma_pct = 100 * (np.exp(sigma_reduit) - 1)
+            cholesky_pct = 100 * (np.exp(choc_cholesky) - 1)
+
+            interpretation_reduite = (
+                f"1 sigma résiduel correspond à environ "
+                f"{sigma_pct:.2f} % du niveau"
+            )
+
+            interpretation_cholesky = (
+                f"Impact propre du choc orthogonal correspond à environ "
+                f"{cholesky_pct:.2f} % du niveau"
             )
 
         elif transformation == "log_difference":
-            unite_modele = "variation logarithmique"
-            variation_pct = 100 * (np.exp(ecart_type_choc[i]) - 1)
 
-            interpretation = (
-                f"Un choc d'un écart-type correspond à un rendement "
-                f"d'environ {variation_pct:.2f} %"
+            unite_modele = "rendement logarithmique"
+
+            sigma_pct = 100 * (np.exp(sigma_reduit) - 1)
+            cholesky_pct = 100 * (np.exp(choc_cholesky) - 1)
+
+            interpretation_reduite = (
+                f"1 sigma résiduel correspond à un rendement "
+                f"d'environ {sigma_pct:.2f} %"
+            )
+
+            interpretation_cholesky = (
+                f"Impact propre du choc orthogonal correspond à un "
+                f"rendement d'environ {cholesky_pct:.2f} %"
             )
 
         elif transformation == "log_difference_100":
+
             unite_modele = "pourcentage"
-            interpretation = (
-                f"Un choc d'un écart-type correspond à une variation "
-                f"d'environ {ecart_type_choc.2f} %"
+
+            interpretation_reduite = (
+                f"1 sigma résiduel correspond à environ "
+                f"{sigma_reduit:.2f} %"
+            )
+
+            interpretation_cholesky = (
+                f"Impact propre du choc orthogonal correspond à environ "
+                f"{choc_cholesky:.2f} %"
             )
 
         elif transformation == "standardise":
+
             unite_modele = "écart-type"
-            interpretation = (
-                f"Un choc résiduel d'un écart-type vaut "
-                f"{ecart_type_choc.4f} unité standardisée"
+
+            interpretation_reduite = (
+                f"1 sigma résiduel = "
+                f"{sigma_reduit:.4f} unité standardisée"
+            )
+
+            interpretation_cholesky = (
+                f"Impact propre du choc orthogonal = "
+                f"{choc_cholesky:.4f} unité standardisée"
             )
 
         else:
+
             unite_modele = "transformation inconnue"
-            interpretation = "Transformation à préciser"
+            interpretation_reduite = "Transformation à préciser"
+            interpretation_cholesky = "Transformation à préciser"
 
         lignes.append({
             "variable": variable,
+            "modele": type_modele,
             "transformation": transformation,
-            "unite_originale_probable": unite_originale,
+            "unite_originale": unite_originale,
             "unite_dans_le_modele": unite_modele,
-            "ecart_type_historique": ecart_type_donnees.loc[variable],
-            "ecart_type_innovation_vecm": ecart_type_choc[i],
-            "interpretation_choc_1_sigma": interpretation
+            "ecart_type_historique": std_historique[i],
+            "ecart_type_residuel": sigma_reduit,
+            "impact_propre_cholesky": choc_cholesky,
+            "interpretation_sigma_residuel": interpretation_reduite,
+            "interpretation_choc_cholesky": interpretation_cholesky
         })
 
-    return pd.DataFrame(lignes).set_index("variable")
+    resume = pd.DataFrame(lignes).set_index("variable")
+
+    P_df = pd.DataFrame(
+        P,
+        index=variables,
+        columns=[f"choc_{variable}" for variable in variables]
+    )
+
+    return resume, P_df
