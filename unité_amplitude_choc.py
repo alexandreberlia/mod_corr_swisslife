@@ -2,96 +2,300 @@ import numpy as np
 import pandas as pd
 
 
-def inferer_unite_bloomberg(nom):
+import re
+import unicodedata
 
-    nom_upper = str(nom).upper().strip()
 
-    tokens_pourcentage = [
-        "YOY",       # variation annuelle
-        "CYOY",      # variation annuelle
-        "XYOY",      # variation annuelle
-        "CQOQ",      # variation trimestrielle
-        "CHY%",      # variation en %
-        "MOM",       # variation mensuelle
-        "FED FUNDS",
-        "USURTOT",
-        "PIQQ"
-    ]
+def normaliser_nom(nom):
+    nom = str(nom).strip().upper()
+    nom = unicodedata.normalize(
+        "NFKD",
+        nom
+    ).encode(
+        "ascii",
+        "ignore"
+    ).decode("ascii")
 
-    if any(token in nom_upper for token in tokens_pourcentage):
-        return "pourcentage / points de pourcentage"
-    if "NFP TCH" in nom_upper:
+    nom = re.sub(r"\s+", " ", nom)
+
+    return nom
+
+
+def inferer_unite_variable(nom):
+
+    nom_upper = normaliser_nom(nom)
+
+    # ==================================================
+    # 1. PIB
+    # ==================================================
+
+    if (
+        "GDP US CHAINED DOLLARS QOQ" in nom_upper
+        or (
+            "GDP" in nom_upper
+            and "QOQ" in nom_upper
+        )
+    ):
+        return (
+            "pourcentage de variation trimestrielle annualisée"
+        )
+
+    if (
+        "GDP US CHAINED DOLLARS YOY" in nom_upper
+        or (
+            "GDP" in nom_upper
+            and "YOY" in nom_upper
+            and "NOMINAL" not in nom_upper
+        )
+    ):
+        return "pourcentage de variation annuelle"
+
+    if (
+        "GDP" in nom_upper
+        and "NOMINAL" in nom_upper
+        and "YOY" in nom_upper
+    ):
+        return "pourcentage de variation annuelle"
+
+    if (
+        "GDP PRICE INDEX" in nom_upper
+        and "QOQ" in nom_upper
+    ):
+        return (
+            "pourcentage de variation trimestrielle annualisée"
+        )
+
+    # ==================================================
+    # 2. Emploi
+    # ==================================================
+
+    if "UNEMPLOYMENT RATE" in nom_upper:
+        return "point de pourcentage"
+
+    if "EMPLOYEES ON NONFARM PAYROL" in nom_upper:
         return "milliers d'emplois"
 
-    if "ADP CHNG" in nom_upper:
+    if "ADP NATIONAL EMPLOYMENT REPORT" in nom_upper:
         return "milliers d'emplois"
-    tokens_pmi = [
-        "PMI",
-        "NAPM"
+
+    # ==================================================
+    # 3. Inflation et salaires
+    # ==================================================
+
+    if "AVG HOURLY EARNINGS" in nom_upper:
+        return (
+            "pourcentage de variation ou dollar par heure "
+            "selon la série source"
+        )
+
+    if "CPI URBAN CONSUMERS" in nom_upper:
+        return "pourcentage de variation annuelle"
+
+    if "PPI FINISHED GOODS" in nom_upper:
+        return "pourcentage de variation annuelle"
+
+    if (
+        "PERSONAL CONSUMPTION EXPEND" in nom_upper
+        and "(INFLATION)" in nom_upper
+    ):
+        return "pourcentage de variation annuelle"
+
+    # ==================================================
+    # 4. Production et activité économique
+    # ==================================================
+
+    if (
+        "INDUSTRIAL PRODUCTION" in nom_upper
+        and "YOY" in nom_upper
+    ):
+        return "pourcentage de variation annuelle"
+
+    if "CAPACITY UTILIZATION" in nom_upper:
+        return "point de pourcentage"
+
+    if "DURABLE GOODS NEW ORDERS" in nom_upper:
+        return (
+            "pourcentage de variation mensuelle "
+            "ou millions de dollars selon la série source"
+        )
+
+    if "CHICAGO FED NATIONAL ACTIVITY" in nom_upper:
+        return "point d'indice standardisé"
+
+    if "CONFERENCE BOARD US LEADING IN" in nom_upper:
+        return "point d'indice"
+
+    # ==================================================
+    # 5. PMI et conditions d'activité
+    # ==================================================
+
+    if "PMI" in nom_upper:
+        return "point d'indice PMI"
+
+    if "PHILADELPHIA FED BUSINESS" in nom_upper:
+        return "point d'indice de diffusion"
+
+    if "EMPIRE STATE MANUFACTURING" in nom_upper:
+        return "point d'indice de diffusion"
+
+    if "RICHMOND MANUFACTURING SURVEY" in nom_upper:
+        return "point d'indice de diffusion"
+
+    if "MARKET NEWS INTERNATIONAL CHIC" in nom_upper:
+        return "point d'indice PMI"
+
+    # ==================================================
+    # 6. Immobilier
+    # ==================================================
+
+    if "PRIVATE HOUSING AUTHORIZED" in nom_upper:
+        return (
+            "milliers de logements, rythme annualisé"
+        )
+
+    if "NAR TOTAL EXISTING HOMES" in nom_upper:
+        return (
+            "millions de logements, rythme annualisé"
+        )
+
+    # ==================================================
+    # 7. Consommation et revenu des ménages
+    # ==================================================
+
+    if (
+        "RETAIL SALES" in nom_upper
+        and "MOM" in nom_upper
+    ):
+        return "pourcentage de variation mensuelle"
+
+    if (
+        "RETAIL SALES" in nom_upper
+        and "YOY" in nom_upper
+    ):
+        return "pourcentage de variation annuelle"
+
+    if "AUTO SALES TOTAL ANNUALIZED" in nom_upper:
+        return (
+            "millions de véhicules, rythme annualisé"
+        )
+
+    if "PERSONAL INCOME YOY" in nom_upper:
+        return "pourcentage de variation annuelle"
+
+    if (
+        "PERSONAL CONSUMPTION EXPEND %" in nom_upper
+        or (
+            "PERSONAL CONSUMPTION EXPEND" in nom_upper
+            and "%" in str(nom)
+        )
+    ):
+        return "pourcentage de variation"
+
+    if (
+        "PERSONAL CONSUMPTION EXPEND" in nom_upper
+        and "(HOUSEHOLD)" in nom_upper
+    ):
+        return (
+            "milliards de dollars ou indice, "
+            "selon la série source"
+        )
+
+    # ==================================================
+    # 8. Confiance des consommateurs
+    # ==================================================
+
+    if "CONFERENCE BOARD CONSUMER CONF" in nom_upper:
+        return "point d'indice de confiance"
+
+    if "UNIVERSITY OF MICHIGAN CONSUME" in nom_upper:
+        return "point d'indice de confiance"
+
+    # ==================================================
+    # 9. Indices actions
+    # ==================================================
+
+    indices_actions = [
+        "S&P 500",
+        "MSCI WORLD",
+        "NASDAQ",
+        "RUSSELL 2000"
     ]
 
-    if any(token in nom_upper for token in tokens_pmi):
-        return "points d'indice PMI"
-    tokens_indices = [
-        "CONCCONF",
-        "CONSSENT",
-        "CFNAI",
-        "LEI",
-        "RCHSINDX",
-        "CHPMINDX",
-        "EMPRGBCI",
-        "OUTFGAF"
-    ]
+    if any(
+        indice in nom_upper
+        for indice in indices_actions
+    ):
+        return "point d'indice"
 
-    if any(token in nom_upper for token in tokens_indices):
-        return "points d'indice"
-    if "NHSPATOT" in nom_upper:
-        return "milliers de logements, rythme annualisé"
+    # ==================================================
+    # 10. Taux d'intérêt
+    # ==================================================
 
-    if "ETSLTOTL" in nom_upper:
-        return "millions de logements, rythme annualisé"
+    if "FED FUNDS" in nom_upper:
+        return "point de pourcentage"
 
-    if "SAARTOTL" in nom_upper:
-        return "millions de véhicules, rythme annualisé"
-    if "XAU" in nom_upper:
-        return "dollars US par once troy"
+    # ==================================================
+    # 11. Matières premières
+    # ==================================================
 
-    if "CL1" in nom_upper:
-        return "dollars US par baril"
+    if "GOLD SPOT" in nom_upper:
+        return "dollar US par once troy"
 
-    if "LMCADS03" in nom_upper:
-        return "dollars US par tonne métrique"
+    if (
+        "GENERIC 1ST" in nom_upper
+        and "CL" in nom_upper
+    ):
+        return "dollar US par baril"
 
-    if "BITCOIN" in nom_upper or "ETHEREUM" in nom_upper:
-        return "dollars US"
+    if "IRON ORE SPOT PRICE" in nom_upper:
+        return "dollar US par tonne métrique"
 
-    # Indices actions
-    tokens_indices_actions = [
-        "SPX",
-        "MXWO",
-        "CCMP",
-        "RTY",
-        "S5FINL",
-        "S5INFT",
-        "S5HLTH",
-        "S5COND",
-        "S5TELS",
-        "S5INDU",
-        "S5CONS",
-        "S5ENRS",
-        "S5UTIL",
-        "S5MATR",
-        "S5RLST"
-    ]
+    if "LME COPPER" in nom_upper:
+        return "dollar US par tonne métrique"
 
-    if any(token in nom_upper for token in tokens_indices_actions):
-        return "points d'indice"
+    # ==================================================
+    # 12. Cryptomonnaies
+    # ==================================================
 
-    if "INDEX" in nom_upper:
-        return "points d'indice ou unité spécifique Bloomberg"
+    if (
+        "BBG BTC" in nom_upper
+        or "BITCOIN" in nom_upper
+    ):
+        return "dollar US par bitcoin ou point d'indice"
 
-    return "unité non identifiée"
+    if (
+        "BBG ETH" in nom_upper
+        or "ETHEREUM" in nom_upper
+    ):
+        return "dollar US par ether ou point d'indice"
 
+    # ==================================================
+    # 13. Sous-indices sectoriels du S&P 500
+    # ==================================================
+
+    if "SUB S&P500 INDICATOR" in nom_upper:
+        return "point d'indice sectoriel"
+
+    # ==================================================
+    # 14. Règles génériques
+    # ==================================================
+
+    if "YOY" in nom_upper:
+        return "pourcentage de variation annuelle"
+
+    if "QOQ" in nom_upper:
+        return "pourcentage de variation trimestrielle"
+
+    if "MOM" in nom_upper:
+        return "pourcentage de variation mensuelle"
+
+    if "%" in str(nom):
+        return "pourcentage ou point de pourcentage"
+
+    if "STOCK INDEX" in nom_upper:
+        return "point d'indice"
+
+    return "unité à vérifier"
 
 def resume_unites_irf(
     model_result,
@@ -144,7 +348,7 @@ def resume_unites_irf(
         transformation = transformations.get(variable, "niveau")   
         unite_originale = unites.get(
             variable,
-            inferer_unite_bloomberg(variable)
+            inferer_unite_variable(variable)
         )
 
 
@@ -268,4 +472,4 @@ def resume_unites_irf(
         columns=[f"choc_{variable}" for variable in variables]
     )
 
-    return resume, P_df
+    return resume
