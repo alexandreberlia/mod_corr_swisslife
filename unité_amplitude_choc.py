@@ -137,8 +137,6 @@ def tableau_unites_irf(
             variable,
             inferer_unite_bloomberg(variable)
         )
-
-        # Détermination de l'unité dans le modèle
         if transformation == "niveau":
             unite_modele = unite_originale
             interpretation = (
