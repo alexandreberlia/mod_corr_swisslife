@@ -59,7 +59,7 @@ def integration_order(series):
     return "> I(2)"
 
 
-def stationarity_report():
+def stationarity_report(dict_of_df):
 
     results = []
 
