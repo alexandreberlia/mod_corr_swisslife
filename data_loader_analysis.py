@@ -1,14 +1,27 @@
 from data_loader import df
 import pandas as pd
 
-df=df.copy()
+df_original_values = df.copy()
+df_work = df.copy()
 
-def convert_date_columns(df):
-    for i in range(0, len(df.columns), 2):
-        column = df.columns[i]
-        df[column] = pd.to_datetime(df[column], dayfirst=True)
 
-    return df
+def convert_date_columns(dataframe):
+    dataframe = dataframe.copy()
+
+    for i in range(
+        0,
+        len(dataframe.columns) - 1,
+        2
+    ):
+        column = dataframe.columns[i]
+
+        dataframe[column] = pd.to_datetime(
+            dataframe[column],
+            dayfirst=True,
+            errors="coerce"
+        )
+
+    return dataframe
 
 
 def count_dfs(df):
