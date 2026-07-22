@@ -332,7 +332,7 @@ def I_1_block(dict_of_df):
                 dict_of_df
             ),
             get_series(
-                "LME COPPER 3MO ($) (Materials)",
+                "LME COPPER    3MO ($) (Materials)",
                 dict_of_df
             ),
             get_series(
