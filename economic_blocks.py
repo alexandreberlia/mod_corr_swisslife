@@ -307,6 +307,12 @@ def I_1_block(dict_of_df):
                 "University of Michigan Consume (Customer Trust)",
                 dict_of_df
             ),
+        ],
+        axis=1
+    ).dropna()
+
+def indice_block(dict_of_df):
+    return pd.concat([
             get_series(
                 "S&P 500 (Stock Index)",
                 dict_of_df
