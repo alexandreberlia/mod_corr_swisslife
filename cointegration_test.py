@@ -1,14 +1,42 @@
 from statsmodels.tsa.stattools import coint
+import pandas as pd
+
 
 def cointegration_report(
         significance_level=0.05,
         save_excel='no',
         excel_name='Cointegration_Report',
-        cell_width=75):
+        cell_width=75,
+        scope='block'):  # 'block' ou 'all'
 
     results = []
 
-    for df_name, dataframe in dict_of_df.items():
+    if scope == 'block':
+
+        datasets = []
+
+        for df_name, dataframe in dict_of_df.items():
+            datasets.append(
+                (df_name, dataframe)
+            )
+
+    elif scope == 'all':
+
+        all_df = pd.concat(
+            dict_of_df.values(),
+            axis=1
+        )
+
+        datasets = [
+            ('FULL_DATASET', all_df)
+        ]
+
+    else:
+        raise ValueError(
+            "scope must be 'block' or 'all'"
+        )
+
+    for df_name, dataframe in datasets:
 
         columns = dataframe.columns.tolist()
 
@@ -40,30 +68,26 @@ def cointegration_report(
                     results.append({
 
                         "DataFrame": df_name,
-
                         "Variable 1": var1,
-
                         "Variable 2": var2,
-
                         "Cointegration Statistic": score,
-
                         "p-value": pvalue,
-
                         "5% Critical Value": critical_values[1],
-
-                        "Cointegrated": pvalue < significance_level
+                        "Cointegrated":
+                            pvalue < significance_level
 
                     })
 
-                except:
-
+                except Exception:
                     continue
 
     results_df = pd.DataFrame(results)
 
-    results_df = results_df.sort_values(
-        by="p-value"
-    )
+    if len(results_df) > 0:
+
+        results_df = results_df.sort_values(
+            by="p-value"
+        )
 
     if save_excel == 'yes':
 
@@ -83,20 +107,14 @@ def cointegration_report(
 
         wb.save(
             f"{excel_name}.xlsx"
+        )
 
-def significant_cointegrated_pairs(
-        significance_level=0.05):
+    return results_df
 
-    df = cointegration_report(
-        significance_level=significance_level
-    )
-
-    return df[
-        df["Cointegrated"] == True
-    ]
 
 def cointegration_I1_only(
-        significance_level=0.05):
+        significance_level=0.05,
+        scope='block'):
 
     stationarity_df = stationarity_report()
 
@@ -109,7 +127,32 @@ def cointegration_I1_only(
 
     results = []
 
-    for df_name, dataframe in dict_of_df.items():
+    if scope == 'block':
+
+        datasets = []
+
+        for df_name, dataframe in dict_of_df.items():
+            datasets.append(
+                (df_name, dataframe)
+            )
+
+    elif scope == 'all':
+
+        all_df = pd.concat(
+            dict_of_df.values(),
+            axis=1
+        )
+
+        datasets = [
+            ('FULL_DATASET', all_df)
+        ]
+
+    else:
+        raise ValueError(
+            "scope must be 'block' or 'all'"
+        )
+
+    for df_name, dataframe in datasets:
 
         columns = dataframe.columns.tolist()
 
@@ -146,24 +189,19 @@ def cointegration_I1_only(
 
                     results.append({
 
+                        "DataFrame": df_name,
                         "Variable 1": var1,
-
                         "Variable 2": var2,
-
                         "p-value": pvalue,
-
                         "Cointegrated":
                             pvalue < significance_level
 
                     })
 
-                except:
-
+                except Exception:
                     continue
 
-    return pd.DataFrame(results).sort_values(
-        by="p-value"
+    return (
+        pd.DataFrame(results)
+        .sort_values(by="p-value")
     )
-        )
-
-    return results_df

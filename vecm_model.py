@@ -5,8 +5,9 @@ import pandas as pd
 def estimate_vecm(
         data,
         k_ar_diff,
-        coint_rank=1,
+        coint_rank,
         deterministic="ci",
+        exog=None,
         block_name="Unnamed Block"
 ):
 
@@ -16,7 +17,8 @@ def estimate_vecm(
         data,
         k_ar_diff=k_ar_diff,
         coint_rank=coint_rank,
-        deterministic=deterministic
+        deterministic=deterministic,
+        exog=exog
     )
 
     results = model.fit()
