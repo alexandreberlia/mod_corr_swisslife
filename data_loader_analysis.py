@@ -1,22 +1,18 @@
 from data_loader import df
-
-import numpy as np
 import pandas as pd
 
-
-# Copies de sécurité
 df_original_values = df.copy()
 df_work = df.copy()
 
 
 def convert_date_columns(dataframe):
-    """
-    Convertit en dates les colonnes situées aux positions
-    0, 2, 4, etc.
-    """
     dataframe = dataframe.copy()
 
-    for i in range(0, len(dataframe.columns) - 1, 2):
+    for i in range(
+        0,
+        len(dataframe.columns) - 1,
+        2
+    ):
         column = dataframe.columns[i]
 
         dataframe[column] = pd.to_datetime(
@@ -28,202 +24,146 @@ def convert_date_columns(dataframe):
     return dataframe
 
 
-def count_dfs(dataframe):
-    """
-    Compte le nombre de groupes de dates distincts.
-
-    Attention : cette fonction repose sur la deuxième ligne
-    du DataFrame et peut être fragile.
-    """
-    if len(dataframe) < 2:
-        return 0
-
-    return dataframe.iloc[1, ::2].nunique()
+def count_dfs(df):
+    return df.iloc[1, ::2].nunique()
 
 
-def create_df(dataframe):
-    """
-    Extrait toutes les séries partageant la même colonne
-    de dates que la première colonne du DataFrame.
-    """
-    if dataframe.empty or dataframe.shape[1] < 2:
-        return pd.DataFrame()
+def create_df(df):
+    chosen_column = df.columns[0]
 
-    chosen_column = dataframe.columns[0]
-
-    new_df = pd.DataFrame({
-        chosen_column: dataframe[chosen_column]
-    })
+    new_df = pd.DataFrame()
+    new_df[chosen_column] = df[chosen_column]
 
     cols_to_drop = []
 
-    for i in range(0, len(dataframe.columns) - 1, 2):
-        date_column = dataframe.columns[i]
-        value_column = dataframe.columns[i + 1]
+    for i in range(len(df.columns)):
+        if df[df.columns[i]].equals(df[chosen_column]):
 
-        if dataframe[date_column].equals(
-            dataframe[chosen_column]
-        ):
-            new_df[value_column] = dataframe[value_column]
+            if i + 1 < len(df.columns):
+                next_column = df.columns[i + 1]
 
-            cols_to_drop.extend([
-                date_column,
-                value_column
-            ])
+                new_df[next_column] = df[next_column]
 
-    if not cols_to_drop:
-        return pd.DataFrame()
+                cols_to_drop.extend(
+                    [df.columns[i], next_column]
+                )
 
-    dataframe.drop(
-        columns=cols_to_drop,
-        inplace=True,
-        errors="ignore"
-    )
+    df.drop(columns=cols_to_drop, inplace=True)
 
-    new_df = new_df.dropna(
-        subset=[chosen_column]
-    )
-
-    new_df.set_index(
-        chosen_column,
-        inplace=True
-    )
-
-    new_df.index = pd.to_datetime(
-        new_df.index,
-        errors="coerce"
-    )
-
-    new_df = new_df[
-        ~new_df.index.isna()
-    ]
-
-    new_df = new_df.sort_index()
+    new_df.set_index(chosen_column, inplace=True)
 
     return new_df
 
 
-def generate_dataframes(dataframe):
-    """
-    Génère les différents DataFrames et les retourne
-    dans un dictionnaire.
-    """
-    dataframe = dataframe.copy()
-    generated_dfs = {}
+def generate_dataframes(df):
 
-    i = 1
+    num_dataframes = count_dfs(df)
 
-    while dataframe.shape[1] >= 2:
-        previous_number_columns = dataframe.shape[1]
+    for i in range(1, num_dataframes + 3):
 
-        new_df = create_df(dataframe)
+        new_df = create_df(df)
+
+        new_df = new_df.dropna()
+
+        globals()[f"df{i}"] = new_df
 
         if new_df.empty:
             break
 
-        new_df = new_df.dropna(how="all")
+df_work = convert_date_columns(df_work)
+generate_dataframes(df_work)
+df_original = pd.read_csv(
+    "corrected_file.csv"
+)
 
-        generated_dfs[f"df{i}"] = new_df
+mapping = {}
 
-        # Sécurité contre une boucle infinie
-        if dataframe.shape[1] == previous_number_columns:
-            break
+for i in range(
+        0,
+        len(df_original.columns)-1,
+        2):
+
+    date_col = df_original.columns[i]
+
+    value_col = df_original.columns[i+1]
+
+    if str(date_col).startswith(
+            "Dates for "):
+
+        mapping[
+            f"Unnamed: {i+1}"
+        ] = value_col
+
+
+for i in range(1, 100):
+
+    df_name = f"df{i}"
+
+    if df_name in globals():
+
+        globals()[df_name].rename(
+            columns=mapping,
+            inplace=True
+        )
+
+dict_of_df = {}
+
+i = 1
+
+while True:
+
+    df_name = f"df{i}"
+
+    if df_name in globals():
+
+        if isinstance(globals()[df_name], pd.DataFrame):
+            dict_of_df[df_name] = globals()[df_name]
 
         i += 1
 
-    return generated_dfs
+    else:
+        break
 
 
-def convert_to_weeks(dict_of_dataframes):
-    """
-    Convertit chaque DataFrame en fréquence hebdomadaire.
-    """
-    weekly_dataframes = {}
+def convert_to_weeks():
 
-    for key, dataframe in dict_of_dataframes.items():
-        dataframe = dataframe.copy()
+    global dict_of_df
 
-        # Conversion des colonnes en valeurs numériques
-        dataframe = dataframe.apply(
-            pd.to_numeric,
-            errors="coerce"
-        )
+    for key, dataframe in dict_of_df.items():
+
+        weekly_df = dataframe.resample("W").mean()
 
         weekly_df = (
-            dataframe
-            .resample("W")
-            .mean()
+            weekly_df
             .interpolate(method="linear")
             .round(2)
         )
 
-        weekly_dataframes[key] = weekly_df
+        dict_of_df[key] = weekly_df
 
-    return weekly_dataframes
-
-
-def materials_block(dict_of_dataframes):
-    """
-    Assemble horizontalement tous les DataFrames
-    contenus dans le dictionnaire.
-    """
-    if not dict_of_dataframes:
-        return pd.DataFrame()
-
-    combined_df = pd.concat(
-        list(dict_of_dataframes.values()),
-        axis=1,
-        join="outer"
-    )
-
-    # Suppression éventuelle des colonnes dupliquées
-    combined_df = combined_df.loc[
-        :,
-        ~combined_df.columns.duplicated()
-    ]
-
-    return combined_df.sort_index()
+        globals()[key] = weekly_df
 
 
-# --------------------------------------------------
-# Exécution
-# --------------------------------------------------
+convert_to_weeks()
 
-df_work = convert_date_columns(df_work)
+print(f"{len(dict_of_df)} dataframes créés")
 
-dict_of_df = generate_dataframes(df_work)
-
-# Conversion hebdomadaire
-dict_of_df = convert_to_weeks(dict_of_df)
-
-# Pas besoin de lire corrected_file.csv
-df_original = df_original_values.copy()
-
-
-# Création du mapping à partir du DataFrame original
 mapping = {}
 
 for i in range(0, len(df_original.columns) - 1, 2):
+
     date_col = df_original.columns[i]
     value_col = df_original.columns[i + 1]
 
     if str(date_col).startswith("Dates for "):
-        mapping[f"Unnamed: {i + 1}"] = value_col
+        mapping[f"Unnamed: {i+1}"] = value_col
 
+print(mapping)
+for name in dict_of_df:
 
-# Renommage des colonnes
-for name, dataframe in dict_of_df.items():
-    dict_of_df[name] = dataframe.rename(
-        columns=mapping
+    dict_of_df[name].rename(
+        columns=mapping,
+        inplace=True
     )
 
-
-# Assemblage final
-materials_df = materials_block(dict_of_df)
-
-
-print(f"{len(dict_of_df)} DataFrames créés")
-print("Dimensions du bloc final :", materials_df.shape)
-print("Mapping :", mapping)
-
-display(materials_df.head())
+    globals()[name] = dict_of_df[name]
