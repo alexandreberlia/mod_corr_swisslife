@@ -311,7 +311,7 @@ def I_1_block(dict_of_df):
         axis=1
     ).dropna()
 
-def indice_block(dict_of_df):
+def index_block(dict_of_df):
     return pd.concat([
             get_series(
                 "S&P 500 (Stock Index)",
@@ -322,9 +322,20 @@ def indice_block(dict_of_df):
                 dict_of_df
             ),
             get_series(
+                "RUSSELL 2000 INDEX (Stock Index)",
+                dict_of_df
+            ),
+            get_series(
                 "NASDAQ (Stock Index)",
                 dict_of_df
             ),
+        ],
+        axis=1
+    ).dropna()
+
+
+def materials_block(dict_of_df):
+    return pd.concat([
             get_series(
                 "Gold Spot   $/Oz (Materials)",
                 dict_of_df
@@ -341,10 +352,13 @@ def indice_block(dict_of_df):
                 "LME COPPER    3MO ($) (Materials)",
                 dict_of_df
             ),
-            get_series(
-                "RUSSELL 2000 INDEX (Stock Index)",
-                dict_of_df
-            ),
+        ],
+        axis=1
+    ).dropna()
+
+
+def other_block(dict_of_df):
+    return pd.concat([
             get_series(
                 "BBG BTC Index (Crypto)",
                 dict_of_df
@@ -365,7 +379,6 @@ def indice_block(dict_of_df):
                 "Santé (Sub S&P500 Indicator)",
                 dict_of_df
             ),
-
         ],
         axis=1
     ).dropna()
