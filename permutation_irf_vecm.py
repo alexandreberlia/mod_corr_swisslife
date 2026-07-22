@@ -4,7 +4,7 @@ from math import factorial
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-
+from irf_vecm import compute_irf_vecm
 # ============================================================
 # ESTIMER UN VECM POUR PLUSIEURS ORDRES DE CHOLESKY
 # ============================================================
