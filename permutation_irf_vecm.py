@@ -121,17 +121,6 @@ def estimate_vecm_permutations(
         number_of_orders = factorial(
             len(variables)
         )
-
-        if number_of_orders > max_permutations:
-            raise ValueError(
-                f"{len(variables)} variables produisent "
-                f"{number_of_orders} permutations.\n"
-                f"La limite actuelle est {max_permutations}.\n\n"
-                "Sélectionne moins de variables ou fournis "
-                "manuellement une liste d'ordres avec "
-                "l'argument orders."
-            )
-
         orders_to_estimate = [
             list(order)
             for order in permutations(variables)
