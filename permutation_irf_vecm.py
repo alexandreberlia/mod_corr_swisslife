@@ -93,23 +93,15 @@ def estimate_vecm_permutations(
             "La liste variables contient des doublons."
         )
 
-    # Préparation des données
-    data_vecm = (
-        data
-        .loc[:, variables]
-        .copy()
-        .sort_index()
-    )
-
-    for column in data_vecm.columns:
-        data_vecm[column] = pd.to_numeric(
-            data_vecm[column],
+    for column in data.columns:
+        data[column] = pd.to_numeric(
+            data[column],
             errors="coerce"
         )
 
-    data_vecm = data_vecm.dropna()
+    data = data.dropna()
 
-    if data_vecm.empty:
+    if data.empty:
         raise ValueError(
             "Aucune observation disponible après "
             "suppression des valeurs manquantes."
@@ -169,7 +161,7 @@ def estimate_vecm_permutations(
                 f"Ordre : {order_name}"
             )
 
-        permuted_data = data_vecm.loc[
+        permuted_data = data.loc[
             :,
             current_order
         ].copy()
@@ -210,7 +202,7 @@ def estimate_vecm_permutations(
         "orders": estimated_orders,
         "failed_orders": failed_orders,
         "reference_order": variables,
-        "data": data_vecm
+        "data": data
     }
 
 # ============================================================
