@@ -1765,47 +1765,78 @@ et non comme :
 IMPULSE RESPONSE FUNCTIONS (IRF)
 --------------------------------
 
-Les fonctions de réponse impulsionnelle mesurent
-la réaction dynamique des variables du système
-suite à un choc exogène sur l'une d'elles.
+## Fonctions de réponse impulsionnelle
 
-Question économique :
+Les fonctions de réponse impulsionnelle, ou **IRF**, mesurent la réaction dynamique des variables d’un modèle VAR ou VECM à la suite d’un choc inattendu sur l’une d’entre elles.
 
-    Que se passe-t-il lorsqu'une variable
-    subit un choc inattendu ?
+### Construction
 
-Exemple :
+Les IRF reposent sur la représentation moyenne mobile, dite représentation de Wold :
 
-    Industrial Production
-            ↓
-          GDP
+\[
+Y_t = \mu + \sum_{h=0}^{\infty}\Psi_h \varepsilon_{t-h}
+\]
 
-L'IRF permet de mesurer :
+Le coefficient \(\Psi_{h,jk}\) représente la réponse de la variable \(j\), à l’horizon \(h\), à un choc unitaire sur l’innovation \(k\). Pour un choc d’amplitude \(\delta\), la réponse est :
 
-    - la direction du choc
-    - son amplitude
-    - sa durée
-    - sa vitesse de dissipation
+\[
+\delta \Psi_{h,jk}
+\]
 
-Lecture :
+Les coefficients \(\Psi_h\) peuvent être calculés avec le module `coeff_ma_var`.
 
-    Axe horizontal
-        → horizon temporel
+Une IRF n’est pas une prévision inconditionnelle. Elle représente une projection dynamique conditionnelle : elle indique comment une variable devrait évoluer selon le modèle si un choc donné survenait.
 
-    Axe vertical
-        → réponse de la variable
+### Amplitude du choc
 
-Une réponse positive signifie :
+Dans une IRF orthogonalisée, le choc correspond généralement à un écart-type de l’innovation concernée. Le module `unite_amplitude_choc` permet d’exprimer cette amplitude dans l’unité de la variable étudiée.
 
-    la variable augmente après le choc.
+### Orthogonalisation des innovations
 
-Une réponse négative signifie :
+Les innovations d’un VAR ou d’un VECM peuvent être corrélées entre les équations à une même date. Cette corrélation contemporaine ne doit pas être confondue avec la corrélation sérielle des résidus, contrôlée notamment par le test de Hosking.
 
-    la variable diminue après le choc.
+La décomposition de Cholesky permet de construire des chocs décorrélés et de variance unitaire :
 
-L'IRF constitue généralement l'outil principal
-d'interprétation économique des modèles VAR.
+\[
+\Sigma_{\varepsilon} = PP'
+\]
 
+Les IRF orthogonalisées sont alors données par :
+
+\[
+\Theta_h = \Psi_h P
+\]
+
+L’ordre des variables impose une identification récursive :
+
+- la première variable ne réagit immédiatement qu’à son propre choc ;
+- la deuxième réagit immédiatement aux chocs des deux premières variables ;
+- les variables suivantes réagissent aux chocs des variables placées avant elles.
+
+L’ordre de Cholesky influence donc les IRF obtenues.
+
+### Permutations de Cholesky
+
+Les modules de permutation estiment les IRF pour plusieurs ordres des variables, puis les replacent dans un ordre commun.
+
+Ils permettent de tracer :
+
+- les IRF propres à chaque ordre ;
+- une IRF globale, calculée par moyenne ou médiane ;
+- une enveloppe de sensibilité fondée sur les quantiles des différents ordres.
+
+L’IRF médiane est moins dépendante d’un ordre unique, mais elle n’est pas totalement indépendante de l’identification de Cholesky. L’enveloppe obtenue mesure la sensibilité à l’ordre et ne constitue pas un intervalle de confiance statistique.
+
+### Lecture
+
+- **Axe horizontal** : nombre de périodes après le choc.
+- **Axe vertical** : réponse de la variable.
+- **Réponse positive** : augmentation de la variable après le choc.
+- **Réponse négative** : diminution de la variable après le choc.
+- **Retour vers zéro** : effet transitoire.
+- **Réponse persistante** : effet durable ou permanent.
+
+Les IRF permettent ainsi d’analyser la direction, l’amplitude, la durée et la vitesse de dissipation d’un choc. Elles constituent l’un des principaux outils d’interprétation économique des modèles VAR et VECM.
 
 FORECAST ERROR VARIANCE DECOMPOSITION (FEVD)
 --------------------------------
