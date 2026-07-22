@@ -72,9 +72,7 @@ def generate_dataframes(df):
 
 df_work = convert_date_columns(df_work)
 generate_dataframes(df_work)
-df_original = pd.read_csv(
-    "corrected_file.csv"
-)
+df_original = df_original_values.copy()
 
 mapping = {}
 
