@@ -1773,15 +1773,15 @@ Les fonctions de réponse impulsionnelle, ou **IRF**, mesurent la réaction dyna
 
 Les IRF reposent sur la représentation moyenne mobile, dite représentation de Wold :
 
-\[
+\
 Y_t = \mu + \sum_{h=0}^{\infty}\Psi_h \varepsilon_{t-h}
-\]
+\
 
 Le coefficient \(\Psi_{h,jk}\) représente la réponse de la variable \(j\), à l’horizon \(h\), à un choc unitaire sur l’innovation \(k\). Pour un choc d’amplitude \(\delta\), la réponse est :
 
-\[
+\
 \delta \Psi_{h,jk}
-\]
+\
 
 Les coefficients \(\Psi_h\) peuvent être calculés avec le module `coeff_ma_var`.
 
