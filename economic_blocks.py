@@ -320,7 +320,7 @@ def I_1_block(dict_of_df):
                 dict_of_df
             ),
             get_series(
-                "Gold Spot $/Oz (Materials)",
+                "Gold Spot   $/Oz (Materials)",
                 dict_of_df
             ),
             get_series(
