@@ -7,6 +7,16 @@ import matplotlib.pyplot as plt
 from scipy.linalg import cholesky
 import numpy as np
 
+def format_label(label, max_length=35):
+    """
+    Coupe les titres longs sur plusieurs lignes.
+    """
+    return "\n".join(
+        textwrap.wrap(
+            str(label),
+            width=max_length
+        )
+    )
 
 def compute_irf_vecm(vecm_results, periods=24):
     """
