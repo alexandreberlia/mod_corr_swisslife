@@ -17,7 +17,6 @@ def estimate_vecm_permutations(
     exog=None,
     variables=None,
     orders=None,
-    max_permutations=120,
     verbose=True
 ):
     """
