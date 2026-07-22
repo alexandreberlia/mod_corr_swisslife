@@ -1773,17 +1773,16 @@ Les fonctions de réponse impulsionnelle, ou **IRF**, mesurent la réaction dyna
 
 Les IRF reposent sur la représentation moyenne mobile, dite représentation de Wold :
 
-\
-Y_t = \mu + \sum_{h=0}^{\infty}\Psi_h \varepsilon_{t-h}
-\
 
-Le coefficient \(\Psi_{h,jk}\) représente la réponse de la variable \(j\), à l’horizon \(h\), à un choc unitaire sur l’innovation \(k\). Pour un choc d’amplitude \(\delta\), la réponse est :
+  Y(t) = μ + Σ Ψ(h) ε(t-h)
 
-\
-\delta \Psi_{h,jk}
-\
+Le coefficient `Ψ(h)[j,k]` représente la réponse de la variable `j`, à l’horizon `h`, à un choc unitaire sur l’innovation `k`.
 
-Les coefficients \(\Psi_h\) peuvent être calculés avec le module `coeff_ma_var`.
+Pour un choc d’amplitude `δ`, la réponse est :
+
+    Réponse(h,j,k) = δ × Ψ(h)[j,k]
+
+Les coefficients `Ψ(h)` peuvent être calculés avec le module `coeff_ma_var`.
 
 Une IRF n’est pas une prévision inconditionnelle. Elle représente une projection dynamique conditionnelle : elle indique comment une variable devrait évoluer selon le modèle si un choc donné survenait.
 
@@ -1797,15 +1796,18 @@ Les innovations d’un VAR ou d’un VECM peuvent être corrélées entre les é
 
 La décomposition de Cholesky permet de construire des chocs décorrélés et de variance unitaire :
 
-\[
-\Sigma_{\varepsilon} = PP'
-\]
 
-Les IRF orthogonalisées sont alors données par :
+Σ(ε) = P × P'
 
-\[
-\Theta_h = \Psi_h P
-\]
+Les innovations de forme réduite peuvent alors être représentées ainsi :
+
+    ε(t) = P × u(t)
+
+Les IRF orthogonalisées sont données par :
+
+    Θ(h) = Ψ(h) × P
+
+Le coefficient `Θ(h)[j,k]` mesure la réponse de la variable `j`, à l’horizon `h`, à un choc orthogonalisé sur la variable `k`.
 
 L’ordre des variables impose une identification récursive :
 
