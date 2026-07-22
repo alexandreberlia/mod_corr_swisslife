@@ -1,5 +1,9 @@
 import pandas as pd
 import matplotlib.pyplot as plt
+import textwrap
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 # ============================================================
 # CALCUL DES IRF POUR VECM
 # ============================================================
