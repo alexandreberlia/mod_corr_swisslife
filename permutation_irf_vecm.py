@@ -1,5 +1,6 @@
 from itertools import permutations
 from math import factorial
+from vecm_model import estimate_vecm
 
 import numpy as np
 import pandas as pd
