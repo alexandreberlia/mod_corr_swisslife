@@ -9,7 +9,14 @@ from irf_vecm import compute_irf_vecm
 # ============================================================
 # ESTIMER UN VECM POUR PLUSIEURS ORDRES DE CHOLESKY
 # ============================================================
-
+def format_label(label, max_length=30):
+    """
+    Coupe les intitulés longs sur plusieurs lignes.
+    """
+    return fill(
+        str(label),
+        width=max_length
+    )
 def estimate_vecm_permutations(
     data,
     k_ar_diff,
