@@ -23,6 +23,4 @@ def load_and_preview_csv(file_name):
     return df
 
 
-df = load_and_preview_csv(
-    "Data_in_value.csv"
-)
+
