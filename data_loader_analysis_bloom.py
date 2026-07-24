@@ -1,4 +1,3 @@
-from data_loader import df
 import pandas as pd
 
 df_original_values = df.copy()
