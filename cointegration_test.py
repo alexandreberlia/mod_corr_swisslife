@@ -41,7 +41,7 @@ import numpy as np
 import pandas as pd
 from statsmodels.tsa.stattools import coint
 
-from stationnarite_bloom import tableau_stationnarite
+from stationnarite_test import tableau_stationnarite
 
 __all__ = ["tableau_cointegration", "corriger_fdr"]
 
