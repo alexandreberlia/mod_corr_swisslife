@@ -1,5 +1,12 @@
 from statsmodels.tsa.stattools import coint
-
+from __future__ import annotations
+ 
+import warnings
+ 
+import numpy as np
+import pandas as pd
+from statsmodels.tsa.stattools import adfuller, coint, kpss
+from statsmodels.tsa.vector_ar.vecm import coint_johansen
 
 def _benjamini_hochberg(pvals: np.ndarray, alpha: float = 0.05) -> np.ndarray:
     """Controle du FDR. Retourne un masque booleen des rejets."""
