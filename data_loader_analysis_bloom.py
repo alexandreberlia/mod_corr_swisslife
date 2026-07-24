@@ -2,22 +2,31 @@
 data_loader_analysis_bloom
 ==========================
 
-Construction des DataFrames et du dictionnaire à partir des séries nettoyées
-par :mod:`data_loader_bloom`.
+Construction des DataFrames et du dictionnaire, à partir des séries
+nettoyées par :mod:`data_loader_bloom`.
 
-Même sortie que les anciens scripts
------------------------------------
+Sortie identique aux anciens scripts
+------------------------------------
 * les séries partageant **exactement le même calendrier** sont regroupées
   dans un DataFrame indexé par la date, une colonne par série ;
-* les DataFrames sont nommés ``df1``, ``df2``, ... **dans l'ordre
-  d'apparition des calendriers dans le fichier** (identique à l'ancien code) ;
+* les DataFrames sont nommés ``df1``, ``df2``, ... dans l'**ordre
+  d'apparition des calendriers dans le fichier** ;
 * ``dict_of_df`` = ``{"df1": DataFrame, "df2": DataFrame, ...}`` ;
 * les colonnes portent le nom exact de la série, p.ex.
   ``"GDP US Chained Dollars QoQ SAA (GDP)"`` ;
-* conversion hebdomadaire : ``resample("W").mean()``, interpolation
-  linéaire, arrondi à 2 décimales.
+* l'index garde le nom de la colonne de dates d'origine
+  (``"Dates for ..."``), comme le faisait ``set_index`` ;
+* **tout est DataFrame**, jamais de Series : pas de ``Name:`` à l'affichage.
 
-...mais sans les bugs et sans ``globals()``.
+Temporalité
+-----------
+**Aucun rééchantillonnage par défaut** : les données restent à leur
+fréquence d'origine. La conversion est explicite et paramétrable :
+
+    weekly    = data.resample("W")    # hebdomadaire
+    monthly   = data.resample("ME")   # fin de mois
+    quarterly = data.resample("QE")   # fin de trimestre
+    daily     = data.resample("D")
 
 Exemple
 -------
@@ -25,24 +34,23 @@ Exemple
 
     data = load_dataset("export.csv", n_series=58,
                         names_file="corrected_file.csv")
-    weekly = data.resample("W")
 
-    dict_of_df = weekly.frames                      # {"df1": DataFrame, ...}
+    dict_of_df = data.frames                        # {"df1": DataFrame, ...}
     dict_of_df["df1"].head()
 
-    weekly["GDP US Chained Dollars QoQ SAA (GDP)"]  # accès direct par nom
-    weekly.wide                                     # tout dans un DataFrame
-    weekly.find("Industrial Production")            # recherche par mot-clé
+    data["GDP US Chained Dollars QoQ SAA (GDP)"]    # DataFrame d'une colonne
+    data.find("Industrial Production")              # recherche par mot-clé
+    data.resample("ME").frames                      # même dict, en mensuel
 
-    # pour du code existant qui attend df1, df2, ... en variables globales :
-    weekly.to_globals(globals())
+    data.to_globals(globals())      # recrée df1, df2, ... pour le code existant
 
-Raccourci en une ligne, strictement équivalent aux anciens scripts :
+Raccourci en une ligne :
 
     from data_loader_analysis_bloom import build_dict_of_df
 
     dict_of_df = build_dict_of_df("export.csv", n_series=58,
-                                  names_file="corrected_file.csv")
+                                  names_file="corrected_file.csv")   # brut
+    dict_of_df = build_dict_of_df("export.csv", freq="W")            # hebdo
 """
 
 from __future__ import annotations
@@ -70,89 +78,98 @@ __all__ = [
 # Transformations (utilisables seules, sans passer par la classe)
 # ---------------------------------------------------------------------------
 def group_by_calendar(
-    series: Mapping[str, pd.Series],
+    series: Mapping[str, pd.DataFrame],
     prefix: str = "df",
-    dropna: str | None = "all",
+    dropna: str | None = "any",
+    index_name: str | None = "original",
 ) -> dict[str, pd.DataFrame]:
     """
     Regroupe les séries partageant exactement le même index de dates.
 
-    Remplace les anciens ``count_dfs`` / ``create_df`` / ``generate_dataframes``.
+    Remplace ``count_dfs`` / ``create_df`` / ``generate_dataframes``.
 
     Parameters
     ----------
-    series : dict {nom exact: Series}.
+    series : dict {nom de série: DataFrame d'une colonne}.
     prefix : préfixe des clés ("df" -> df1, df2, ...).
-    dropna : "all" supprime les lignes entièrement vides (défaut) ;
-        "any" supprime toute ligne dès qu'une série a un trou (comportement
-        de l'ancien code, plus destructeur) ; None ne supprime rien.
+    dropna : "any" supprime toute ligne dès qu'une série du groupe a un trou
+        (comportement des anciens scripts, valeur par défaut) ;
+        "all" ne supprime que les lignes entièrement vides, ce qui préserve
+        les autres séries ; None ne supprime rien.
+    index_name : "original" garde le nom de la colonne de dates du fichier
+        ("Dates for ..."), comme l'ancien ``set_index`` ; sinon une chaîne
+        explicite ("date") ou None.
 
     Returns
     -------
-    dict {"df1": DataFrame, "df2": DataFrame, ...} dans l'ordre d'apparition
-    des calendriers dans le fichier.
+    dict {"df1": DataFrame, "df2": DataFrame, ...}, dans l'ordre
+    d'apparition des calendriers dans le fichier.
     """
-    buckets: dict[tuple[int, ...], list[pd.Series]] = {}
-    for values in series.values():
-        key = tuple(values.index.asi8.tolist())
-        buckets.setdefault(key, []).append(values)  # dict ordonné = ordre du fichier
+    buckets: dict[tuple[int, ...], list[pd.DataFrame]] = {}
+    for frame in series.values():
+        key = tuple(frame.index.asi8.tolist())
+        buckets.setdefault(key, []).append(frame)  # dict ordonné = ordre du fichier
 
     frames: dict[str, pd.DataFrame] = {}
     for position, group in enumerate(buckets.values(), start=1):
-        frame = pd.concat(group, axis=1)
-        frame.index.name = "date"
+        merged = pd.concat(group, axis=1)
+        merged.index.name = (
+            group[0].index.name if index_name == "original" else index_name
+        )
         if dropna:
-            frame = frame.dropna(how=dropna)
-        if frame.empty:
+            merged = merged.dropna(how=dropna)
+        if merged.empty:
             continue
-        frames[f"{prefix}{position}"] = frame
+        frames[f"{prefix}{position}"] = merged
     return frames
 
 
 def resample_frames(
     frames: Mapping[str, pd.DataFrame],
-    rule: str = "W",
+    freq: str = "W",
     how: str = "mean",
     interpolate: str | None = "linear",
     decimals: int | None = 2,
 ) -> dict[str, pd.DataFrame]:
     """
-    Rééchantillonne chaque DataFrame (hebdomadaire par défaut).
+    Change la temporalité de chaque DataFrame.
 
-    Remplace ``convert_to_weeks``, sans modification en place ni ``global``.
+    Remplace ``convert_to_weeks``, sans ``global`` ni modification en place.
 
     Parameters
     ----------
-    rule : fréquence cible ("W", "ME", "QE", "D", ...).
+    freq : fréquence cible — "D", "W", "ME" (fin de mois), "QE", "YE", ...
     how : agrégation ("mean", "last", "median", "sum", "max", "min", ...).
-    interpolate : méthode de comblement des trous créés par le
-        rééchantillonnage, ou None. L'interpolation reste interne aux
+    interpolate : comblement des trous créés par le rééchantillonnage, ou
+        None pour laisser les NaN. L'interpolation reste interne aux
         observations réelles (pas d'extrapolation en début/fin de série).
-    decimals : arrondi final, ou None.
+    decimals : arrondi final, ou None pour ne pas arrondir.
     """
     out: dict[str, pd.DataFrame] = {}
     for key, frame in frames.items():
-        resampled = getattr(frame.resample(rule), how)()
+        index_name = frame.index.name
+        resampled = getattr(frame.resample(freq), how)()
         if interpolate:
             resampled = resampled.interpolate(method=interpolate, limit_area="inside")
         if decimals is not None:
             resampled = resampled.round(decimals)
-        resampled.index.name = frame.index.name or "date"
+        resampled.index.name = index_name
         out[key] = resampled
     return out
 
 
-def to_wide(frames: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
+def to_wide(frames: Mapping[str, pd.DataFrame], index_name: str = "date") -> pd.DataFrame:
     """Fusionne tous les DataFrames en un seul (jointure externe sur les dates)."""
     if not frames:
-        return pd.DataFrame(index=pd.DatetimeIndex([], name="date"))
-    wide = pd.concat(frames.values(), axis=1).sort_index()
-    wide.index.name = "date"
+        return pd.DataFrame(index=pd.DatetimeIndex([], name=index_name))
+    wide = pd.concat(
+        [frame.rename_axis(index_name) for frame in frames.values()], axis=1
+    ).sort_index()
     return wide
 
 
 def summarize(frames: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
-    """Inventaire des séries : DataFrame d'origine, nb de points, période, stats."""
+    """Inventaire : DataFrame d'appartenance, nb de points, période, stats."""
     rows = []
     for key, frame in frames.items():
         for name in frame.columns:
@@ -178,26 +195,27 @@ def summarize(frames: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
 @dataclass(frozen=True)
 class BloombergData:
     """
-    Conteneur immuable : ``frames`` = {"df1": DataFrame, "df2": ...}.
+    Conteneur immuable autour de ``frames`` = {"df1": DataFrame, ...}.
 
-    Chaque transformation renvoie un nouvel objet, rien n'est modifié en place.
+    Chaque transformation renvoie un nouvel objet ; rien n'est modifié en
+    place, et toutes les valeurs renvoyées sont des DataFrames.
     """
 
     frames: dict[str, pd.DataFrame]
 
     # -- accès ------------------------------------------------------------
     @property
-    def series(self) -> dict[str, pd.Series]:
-        """{nom exact de la série: Series}, tous DataFrames confondus."""
+    def by_name(self) -> dict[str, pd.DataFrame]:
+        """{nom de série: DataFrame d'une colonne}, tous groupes confondus."""
         return {
-            name: frame[name]
+            name: frame[[name]]
             for frame in self.frames.values()
             for name in frame.columns
         }
 
     @property
     def names(self) -> list[str]:
-        """Noms exacts de toutes les séries, dans l'ordre du fichier."""
+        """Noms des séries, dans l'ordre du fichier."""
         return [name for frame in self.frames.values() for name in frame.columns]
 
     def __len__(self) -> int:
@@ -207,37 +225,33 @@ class BloombergData:
         return iter(self.frames)
 
     def __contains__(self, key: str) -> bool:
-        return key in self.frames or key in self.series
+        return key in self.frames or key in self.names
 
-    def __getitem__(self, key: str | list[str]) -> pd.Series | pd.DataFrame:
+    def __getitem__(self, key: str | list[str]) -> pd.DataFrame:
         """
-        ``data["df1"]``  -> le DataFrame du groupe
-        ``data["GDP US Chained Dollars QoQ SAA (GDP)"]`` -> la Series
-        ``data[["serie A", "serie B"]]`` -> un DataFrame des deux séries
+        ``data["df1"]`` -> le DataFrame du groupe
+        ``data["GDP US Chained Dollars QoQ SAA (GDP)"]`` -> DataFrame 1 colonne
+        ``data[["serie A", "serie B"]]`` -> DataFrame des deux séries
         """
         if isinstance(key, list):
             return pd.concat([self[name] for name in key], axis=1).sort_index()
         if key in self.frames:
             return self.frames[key]
-        series = self.series
-        if key in series:
-            return series[key]
+        for frame in self.frames.values():
+            if key in frame.columns:
+                return frame[[key]]
         raise KeyError(
-            f"'{key}' n'est ni un DataFrame ({', '.join(self.frames)}) "
-            f"ni une série connue. Essayez .find('{key[:25]}')."
+            f"'{key}' n'est ni un DataFrame ({', '.join(self.frames)}) ni une "
+            f"série connue. Essayez .find('{key[:25]}')."
         )
 
     def find(self, pattern: str, case: bool = False) -> list[str]:
         """Noms de séries contenant ``pattern`` (pratique avec des noms longs)."""
         needle = pattern if case else pattern.lower()
-        return [
-            name
-            for name in self.names
-            if needle in (name if case else name.lower())
-        ]
+        return [name for name in self.names if needle in (name if case else name.lower())]
 
     def frame_of(self, series_name: str) -> str:
-        """Clé du DataFrame ("df3") contenant la série demandée."""
+        """Clé du DataFrame ("df3") qui contient la série demandée."""
         for key, frame in self.frames.items():
             if series_name in frame.columns:
                 return key
@@ -248,8 +262,8 @@ class BloombergData:
             return "BloombergData(vide)"
         wide = self.wide
         return (
-            f"BloombergData({len(self.names)} séries dans {len(self.frames)} "
-            f"DataFrames, {wide.index.min():%Y-%m-%d} -> {wide.index.max():%Y-%m-%d})"
+            f"BloombergData({len(self.names)} séries, {len(self.frames)} DataFrames, "
+            f"{wide.index.min():%Y-%m-%d} -> {wide.index.max():%Y-%m-%d})"
         )
 
     # -- vues -------------------------------------------------------------
@@ -264,16 +278,16 @@ class BloombergData:
     # -- transformations (renvoient un nouvel objet) ----------------------
     def resample(
         self,
-        rule: str = "W",
+        freq: str = "W",
         how: str = "mean",
         interpolate: str | None = "linear",
         decimals: int | None = 2,
     ) -> "BloombergData":
-        """Conversion hebdo (défaut) — équivalent propre de ``convert_to_weeks``."""
+        """Change la temporalité — "D", "W", "ME", "QE", "YE", ..."""
         return BloombergData(
             resample_frames(
                 self.frames,
-                rule=rule,
+                freq=freq,
                 how=how,
                 interpolate=interpolate,
                 decimals=decimals,
@@ -290,12 +304,13 @@ class BloombergData:
         )
 
     # -- compatibilité / export -------------------------------------------
-    def to_globals(self, namespace: MutableMapping[str, object]) -> dict[str, pd.DataFrame]:
+    def to_globals(
+        self, namespace: MutableMapping[str, object]
+    ) -> dict[str, pd.DataFrame]:
         """
-        Injecte df1, df2, ... dans un espace de noms, pour du code existant.
+        Injecte df1, df2, ... dans un espace de noms, pour le code existant.
 
-        Usage : ``data.to_globals(globals())``. À n'utiliser que pour la
-        compatibilité : préférez ``data.frames["df1"]``.
+        Usage : ``data.to_globals(globals())``.
         """
         namespace.update(self.frames)
         return dict(self.frames)
@@ -317,12 +332,19 @@ def load_dataset(
     dayfirst: bool = True,
     names_file: str | Path | None = None,
     names_sep: str = ",",
+    names: list[str] | None = None,
     header_row: int = 0,
     encoding: str | None = None,
     prefix: str = "df",
-    dropna: str | None = "all",
+    dropna: str | None = "any",
+    index_name: str | None = "original",
 ) -> BloombergData:
-    """Charge un export Bloomberg et renvoie un :class:`BloombergData`."""
+    """
+    Charge un export Bloomberg et renvoie un :class:`BloombergData`.
+
+    Les données restent à leur fréquence d'origine ; utilisez ``.resample()``
+    pour changer de temporalité.
+    """
     series = load_bloomberg_csv(
         path,
         sep=sep,
@@ -330,27 +352,32 @@ def load_dataset(
         dayfirst=dayfirst,
         names_file=names_file,
         names_sep=names_sep,
+        names=names,
         header_row=header_row,
         encoding=encoding,
     )
-    return BloombergData(group_by_calendar(series, prefix=prefix, dropna=dropna))
+    return BloombergData(
+        group_by_calendar(series, prefix=prefix, dropna=dropna, index_name=index_name)
+    )
 
 
 def build_dict_of_df(
     path: str | Path,
-    rule: str | None = "W",
+    freq: str | None = None,
+    how: str = "mean",
+    interpolate: str | None = "linear",
+    decimals: int | None = 2,
     **kwargs,
 ) -> dict[str, pd.DataFrame]:
     """
-    Pipeline complet en une ligne : renvoie ``{"df1": DataFrame, ...}``
-    rééchantillonné (hebdo par défaut, ``rule=None`` pour garder la
-    fréquence d'origine).
+    Pipeline complet en une ligne : renvoie ``{"df1": DataFrame, ...}``.
 
-    Équivalent direct des anciens scripts, sans variables globales.
+    ``freq=None`` (défaut) conserve la fréquence d'origine ;
+    ``freq="W"`` / ``"ME"`` / ``"QE"`` applique la conversion correspondante.
     """
     data = load_dataset(path, **kwargs)
-    if rule:
-        data = data.resample(rule)
+    if freq:
+        data = data.resample(freq, how=how, interpolate=interpolate, decimals=decimals)
     return data.frames
 
 
@@ -361,7 +388,7 @@ if __name__ == "__main__":
         print(__doc__)
         raise SystemExit(0)
 
-    dataset = load_dataset(sys.argv[1]).resample("W")
+    dataset = load_dataset(sys.argv[1])
     print(dataset)
     print(dataset.summary())
     print(f"{len(dataset.frames)} DataFrames : {', '.join(dataset.frames)}")
