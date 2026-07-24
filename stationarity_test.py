@@ -1,222 +1,148 @@
+"""
+stationnarite_bloom
+===================
+
+Une fonction : ``tableau_stationnarite(blocs)`` -> DataFrame.
+
+Une ligne par variable, avec les deux tests et le verdict.
+
+Regle de decision (volontairement simple, modifiable en un endroit) :
+    - ADF   H0 = racine unitaire   -> p < alpha  => stationnaire
+    - KPSS  H0 = stationnarite     -> p > alpha  => stationnaire
+    - I(0) si le NIVEAU est stationnaire
+    - I(1) si le niveau ne l'est pas mais la DIFFERENCE PREMIERE l'est
+    - I(2)+ sinon
+
+On ne teste jamais au-dela de la difference premiere : differencier une
+serie deja stationnaire cree un artefact (moyenne mobile non inversible)
+qui fait rejeter KPSS a tort, et c'est exactement ce qui produisait des
+verdicts "I(2)" sur du bruit blanc.
+
+Exemple
+-------
+    from data_loader_analysis_bloom import load_dataset
+    from stationnarite_bloom import tableau_stationnarite
+
+    frames = load_dataset("export.csv", n_series=58).frames
+    stat = tableau_stationnarite(frames)
+    stat[stat["Stationnaire"] == "Non"]
+"""
+
+from __future__ import annotations
+
+import warnings
+
+import numpy as np
+import pandas as pd
 from statsmodels.tsa.stattools import adfuller, kpss
 
+__all__ = ["tableau_stationnarite", "tester_serie"]
 
-def integration_order(
-        series):
+MIN_OBS = 30
 
-    series = pd.to_numeric(
-        series,
-        errors='coerce'
-    ).dropna()
 
-    if len(series) < 30:
-        return "Insufficient observations"
+def _normaliser(blocs) -> dict[str, pd.DataFrame]:
+    """Accepte un DataFrame seul ou un dict {nom: DataFrame}."""
+    if isinstance(blocs, pd.DataFrame):
+        return {"bloc": blocs}
+    return dict(blocs)
 
+
+def tester_serie(serie: pd.Series, alpha: float = 0.05) -> dict:
+    """
+    ADF + KPSS sur le niveau, puis sur la difference premiere si besoin.
+
+    Renvoie un dict plat : c'est ce dict qui devient une ligne du tableau.
+    Toute modification de la regle de decision se fait ici, nulle part ailleurs.
+    """
+    valeurs = pd.to_numeric(serie, errors="coerce").dropna()
+    resultat = {
+        "N": len(valeurs),
+        "ADF stat": np.nan, "ADF p": np.nan,
+        "KPSS stat": np.nan, "KPSS p": np.nan,
+        "Stationnaire": "-", "Ordre": "indetermine", "Remarque": "",
+    }
+
+    if len(valeurs) < MIN_OBS:
+        resultat["Remarque"] = f"moins de {MIN_OBS} observations"
+        return resultat
+
+    # --- niveau ---------------------------------------------------------
+    adf_stat, adf_p = _adf(valeurs)
+    kpss_stat, kpss_p = _kpss(valeurs)
+    resultat.update({"ADF stat": adf_stat, "ADF p": adf_p,
+                     "KPSS stat": kpss_stat, "KPSS p": kpss_p})
+
+    if np.isnan(adf_p) or np.isnan(kpss_p):
+        resultat["Remarque"] = "test en echec"
+        return resultat
+
+    adf_dit_stationnaire = adf_p < alpha
+    kpss_dit_stationnaire = kpss_p > alpha
+
+    if adf_dit_stationnaire and kpss_dit_stationnaire:
+        resultat.update(Stationnaire="Oui", Ordre="I(0)")
+        return resultat
+
+    if adf_dit_stationnaire != kpss_dit_stationnaire:
+        resultat["Remarque"] = "ADF et KPSS en desaccord"
+
+    # --- difference premiere -------------------------------------------
+    diff = valeurs.diff().dropna()
+    if len(diff) < MIN_OBS:
+        resultat["Stationnaire"] = "Non"
+        return resultat
+
+    adf_p_d = _adf(diff)[1]
+    kpss_p_d = _kpss(diff)[1]
+    diff_stationnaire = (adf_p_d < alpha) and (kpss_p_d > alpha)
+
+    resultat["Stationnaire"] = "Non"
+    resultat["Ordre"] = "I(1)" if diff_stationnaire else "I(2)+"
+    return resultat
+
+
+def _adf(serie: pd.Series, regression: str = "c") -> tuple[float, float]:
     try:
-
-        adf_level = adfuller(
-            series,
-            autolag='AIC'
-        )[1]
-
-        if adf_level < 0.05:
-            return "I(0)"
-
+        sortie = adfuller(serie, regression=regression, autolag="AIC")
+        return float(sortie[0]), float(sortie[1])
     except Exception:
-        pass
+        return np.nan, np.nan
 
+
+def _kpss(serie: pd.Series, regression: str = "c") -> tuple[float, float]:
     try:
-
-        adf_diff1 = adfuller(
-            series.diff().dropna(),
-            autolag='AIC'
-        )[1]
-
-        if adf_diff1 < 0.05:
-            return "I(1)"
-
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # p-value bornee a [0.01, 0.10]
+            sortie = kpss(serie, regression=regression, nlags="auto")
+        return float(sortie[0]), float(sortie[1])
     except Exception:
-        pass
-
-    try:
-
-        adf_diff2 = adfuller(
-            series.diff().diff().dropna(),
-            autolag='AIC'
-        )[1]
-
-        if adf_diff2 < 0.05:
-            return "I(2)"
-
-    except Exception:
-        pass
-
-    return "> I(2)"
+        return np.nan, np.nan
 
 
-def stationarity_report(
-        save_excel='no',
-        excel_name='Stationarity_Report',
-        cell_width=75,
-        scope='block'):
+def tableau_stationnarite(blocs, alpha: float = 0.05, decimales: int = 4) -> pd.DataFrame:
+    """
+    Parameters
+    ----------
+    blocs : un DataFrame, ou un dict {nom du bloc: DataFrame} (= dict_of_df).
+    alpha : seuil des deux tests.
 
-    results = []
+    Returns
+    -------
+    DataFrame : Bloc, Variable, N, ADF stat, ADF p, KPSS stat, KPSS p,
+    Stationnaire (Oui/Non), Ordre (I(0)/I(1)/I(2)+), Remarque.
+    """
+    lignes = []
+    for nom_bloc, bloc in _normaliser(blocs).items():
+        for variable in bloc.columns:
+            ligne = {"Bloc": nom_bloc, "Variable": variable}
+            ligne.update(tester_serie(bloc[variable], alpha=alpha))
+            lignes.append(ligne)
 
-    if scope == 'block':
-
-        datasets = list(
-            dict_of_df.items()
-        )
-
-    elif scope == 'all':
-
-        all_df = pd.concat(
-            dict_of_df.values(),
-            axis=1
-        )
-
-        datasets = [
-            ('FULL_DATASET', all_df)
-        ]
-
-    else:
-
-        raise ValueError(
-            "scope must be 'block' or 'all'"
-        )
-
-    for df_name, dataframe in datasets:
-
-        for col in dataframe.columns:
-
-            series = pd.to_numeric(
-                dataframe[col],
-                errors='coerce'
-            ).dropna()
-
-            if len(series) < 30:
-                continue
-
-            try:
-
-                adf_stat, adf_p, _, _, _, _ = adfuller(
-                    series,
-                    autolag='AIC'
-                )
-
-            except Exception:
-
-                adf_stat = np.nan
-                adf_p = np.nan
-
-            try:
-
-                kpss_stat, kpss_p, _, _ = kpss(
-                    series,
-                    regression='c',
-                    nlags='auto'
-                )
-
-            except Exception:
-
-                kpss_stat = np.nan
-                kpss_p = np.nan
-
-            adf_stationary = (
-                adf_p < 0.05
-                if pd.notna(adf_p)
-                else np.nan
-            )
-
-            kpss_stationary = (
-                kpss_p > 0.05
-                if pd.notna(kpss_p)
-                else np.nan
-            )
-
-            results.append({
-
-                "DataFrame": df_name,
-                "Variable": col,
-
-                "ADF Statistic": adf_stat,
-                "ADF p-value": adf_p,
-                "ADF Stationary": adf_stationary,
-
-                "KPSS Statistic": kpss_stat,
-                "KPSS p-value": kpss_p,
-                "KPSS Stationary": kpss_stationary,
-
-                "Integration Order":
-                    integration_order(series)
-
-            })
-
-    results_df = pd.DataFrame(results)
-
-    if save_excel == 'yes':
-
-        results_df.to_excel(
-            f"{excel_name}.xlsx",
-            index=False
-        )
-
-        wb = load_workbook(
-            f"{excel_name}.xlsx"
-        )
-
-        adjust_dimensions(
-            wb,
-            max_column_width=cell_width
-        )
-
-        wb.save(
-            f"{excel_name}.xlsx"
-        )
-
-    return results_df
-
-
-def stationarity_summary(
-        scope='block'):
-
-    df = stationarity_report(
-        scope=scope
-    )
-
-    summary = df[
-        [
-            "Variable",
-            "ADF p-value",
-            "KPSS p-value",
-            "Integration Order"
-        ]
+    tableau = pd.DataFrame(lignes)
+    for colonne in ["ADF stat", "ADF p", "KPSS stat", "KPSS p"]:
+        tableau[colonne] = tableau[colonne].round(decimales)
+    return tableau[
+        ["Bloc", "Variable", "N", "ADF stat", "ADF p", "KPSS stat", "KPSS p",
+         "Stationnaire", "Ordre", "Remarque"]
     ]
-
-    summary = summary.sort_values(
-        by="Integration Order"
-    )
-
-    return summary
-
-
-def print_stationarity_summary(
-        scope='block'):
-
-    summary = stationarity_summary(
-        scope=scope
-    )
-
-    print()
-    print("=" * 100)
-    print("STATIONARITY SUMMARY")
-    print("=" * 100)
-    print()
-
-    print(
-        summary.to_string(
-            index=False
-        )
-    )
-
-    return summary
