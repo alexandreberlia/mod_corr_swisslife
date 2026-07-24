@@ -1,4 +1,4 @@
-from statsmodels.tsa.stattools import coint
+
 from __future__ import annotations
  
 import warnings
