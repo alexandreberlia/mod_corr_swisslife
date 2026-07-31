@@ -469,6 +469,14 @@ def leadlag_ccf(x, y, max_lag: int = 12, prewhiten_series: bool = True,
     if lo > max_lag:
         raise ValueError("min_lag superieur a max_lag.")
     lags = np.arange(lo, max_lag + 1)
+    if purge and lo <= 0:
+        warnings.warn(
+            "purge=True retire la relation CONTEMPORAINE : le decalage 0 n'a plus "
+            "de sens interpretable, et il capte les residus du filtrage. Sous "
+            "independance il rafle le pic dans 33% des cas au lieu de 8%. "
+            "min_lag releve a 1.")
+        lo = 1
+        lags = np.arange(lo, max_lag + 1)
     rho, npair = _ccf(xf, yf, lags)
     n = len(xf)
 
@@ -584,6 +592,14 @@ def leadlag_probit(x, event, max_lag: int = 12, n_boot: int = 300, seed: int = 0
     if lo > max_lag:
         raise ValueError("min_lag superieur a max_lag.")
     lags = np.arange(lo, max_lag + 1)
+    if purge and lo <= 0:
+        warnings.warn(
+            "purge=True retire la relation CONTEMPORAINE : le decalage 0 n'a plus "
+            "de sens interpretable, et il capte les residus du filtrage. Sous "
+            "independance il rafle le pic dans 33% des cas au lieu de 8%. "
+            "min_lag releve a 1.")
+        lo = 1
+        lags = np.arange(lo, max_lag + 1)
 
     def _fit(xv, yv, k, hac: bool = True):
         if k > 0:
