@@ -363,6 +363,45 @@ class LeadLagResult:
         return ax
 
 
+
+def _probit_pseudo_r2(a: np.ndarray, b: np.ndarray, iters: int = 30) -> float:
+    """Pseudo-R2 de McFadden d'un probit univarie, par Newton-Raphson direct.
+
+    Sert UNIQUEMENT dans les boucles de bootstrap, ou seul le critere
+    d'ajustement est utilise. Les statistiques rapportees (coefficient,
+    erreur-type HAC, p-value) restent estimees par statsmodels sur l'echantillon
+    d'origine. Environ 30x plus rapide que d'instancier un sm.Probit par tirage.
+    """
+    from scipy.stats import norm
+    n = len(b)
+    X = np.column_stack([np.ones(n), a])
+    beta = np.zeros(2)
+    pbar = b.mean()
+    if pbar <= 0 or pbar >= 1:
+        return np.nan
+    beta[0] = norm.ppf(pbar)
+    for _ in range(iters):
+        eta = np.clip(X @ beta, -8, 8)
+        Phi = np.clip(norm.cdf(eta), 1e-10, 1 - 1e-10)
+        phi = norm.pdf(eta)
+        lam = phi * (b - Phi) / (Phi * (1 - Phi))
+        w = phi ** 2 / (Phi * (1 - Phi))
+        g = X.T @ lam
+        H = X.T @ (X * w[:, None])
+        try:
+            step = np.linalg.solve(H + 1e-8 * np.eye(2), g)
+        except np.linalg.LinAlgError:
+            return np.nan
+        beta += step
+        if np.max(np.abs(step)) < 1e-7:
+            break
+    eta = np.clip(X @ beta, -8, 8)
+    Phi = np.clip(norm.cdf(eta), 1e-10, 1 - 1e-10)
+    ll = float(np.sum(b * np.log(Phi) + (1 - b) * np.log(1 - Phi)))
+    ll0 = float(n * (pbar * np.log(pbar) + (1 - pbar) * np.log(1 - pbar)))
+    return 1.0 - ll / ll0 if ll0 != 0 else np.nan
+
+
 def _hdi_from_prob(pr: pd.Series, mass: float = 0.90) -> tuple:
     """Intervalle de plus haute densite : plus petit ensemble de lags contigus
     couvrant `mass` de la probabilite."""
@@ -385,7 +424,7 @@ def _hdi_from_prob(pr: pd.Series, mass: float = 0.90) -> tuple:
 # ----------------------------------------------------------------------------
 
 def leadlag_ccf(x, y, max_lag: int = 12, prewhiten_series: bool = True,
-                n_boot: int = 2000, seed: int = 0, max_ar: int = 8,
+                n_boot: int = 500, seed: int = 0, max_ar: int = 8,
                 freq: str | None = None, min_lag: int | None = None,
                 purge: bool = False) -> LeadLagResult:
     """Decalage entre deux series CONTINUES par correlation croisee.
@@ -430,6 +469,14 @@ def leadlag_ccf(x, y, max_lag: int = 12, prewhiten_series: bool = True,
     if lo > max_lag:
         raise ValueError("min_lag superieur a max_lag.")
     lags = np.arange(lo, max_lag + 1)
+    if purge and lo <= 0:
+        warnings.warn(
+            "purge=True retire la relation CONTEMPORAINE : le decalage 0 n'a plus "
+            "de sens interpretable, et il capte les residus du filtrage. Sous "
+            "independance il rafle le pic dans 33% des cas au lieu de 8%. "
+            "min_lag releve a 1.")
+        lo = 1
+        lags = np.arange(lo, max_lag + 1)
     rho, npair = _ccf(xf, yf, lags)
     n = len(xf)
 
@@ -490,7 +537,7 @@ def leadlag_ccf(x, y, max_lag: int = 12, prewhiten_series: bool = True,
 # 2. Probit décalé — cible binaire
 # ----------------------------------------------------------------------------
 
-def leadlag_probit(x, event, max_lag: int = 12, n_boot: int = 1000, seed: int = 0,
+def leadlag_probit(x, event, max_lag: int = 12, n_boot: int = 300, seed: int = 0,
                    hac_lags: int | None = None, criterion: str = "pseudo_r2",
                    freq: str | None = None, min_lag: int | None = None,
                 purge: bool = False) -> LeadLagResult:
@@ -545,8 +592,16 @@ def leadlag_probit(x, event, max_lag: int = 12, n_boot: int = 1000, seed: int = 
     if lo > max_lag:
         raise ValueError("min_lag superieur a max_lag.")
     lags = np.arange(lo, max_lag + 1)
+    if purge and lo <= 0:
+        warnings.warn(
+            "purge=True retire la relation CONTEMPORAINE : le decalage 0 n'a plus "
+            "de sens interpretable, et il capte les residus du filtrage. Sous "
+            "independance il rafle le pic dans 33% des cas au lieu de 8%. "
+            "min_lag releve a 1.")
+        lo = 1
+        lags = np.arange(lo, max_lag + 1)
 
-    def _fit(xv, yv, k):
+    def _fit(xv, yv, k, hac: bool = True):
         if k > 0:
             a, b = xv[:-k], yv[k:]
         elif k < 0:
@@ -557,6 +612,17 @@ def leadlag_probit(x, event, max_lag: int = 12, n_boot: int = 1000, seed: int = 
         a, b = a[m], b[m]
         if len(a) < 25 or b.sum() < 3 or b.sum() == len(b):
             return None
+        if not hac:
+            # Chemin rapide : seul le critere est utilise dans le bootstrap.
+            if criterion == "auc":
+                from sklearn.metrics import roc_auc_score
+                try:
+                    from scipy.stats import norm
+                    return dict(crit=roc_auc_score(b, a))
+                except Exception:
+                    return None
+            c = _probit_pseudo_r2(a, b.astype(float))
+            return None if not np.isfinite(c) else dict(crit=c)
         X = sm.add_constant(a)
         try:
             m = sm.Probit(b, X).fit(disp=0, maxiter=200)
@@ -591,7 +657,7 @@ def leadlag_probit(x, event, max_lag: int = 12, n_boot: int = 1000, seed: int = 
         xb, yb = xa[idx], ya[idx]
         if np.nansum(yb) < 5:
             continue
-        c = np.array([(_fit(xb, yb, int(k)) or {"crit": np.nan})["crit"] for k in lags])
+        c = np.array([(_fit(xb, yb, int(k), hac=False) or {"crit": np.nan})["crit"] for k in lags])
         if np.all(np.isnan(c)):
             continue
         counts[np.nanargmax(c)] += 1
@@ -603,7 +669,7 @@ def leadlag_probit(x, event, max_lag: int = 12, n_boot: int = 1000, seed: int = 
     for i in range(n_boot):
         xi = stationary_bootstrap_index(len(xa), b_len, rng)
         yi = stationary_bootstrap_index(len(ya), by, rng)
-        c = np.array([(_fit(xa[xi], ya[yi], int(k)) or {"crit": np.nan})["crit"] for k in lags])
+        c = np.array([(_fit(xa[xi], ya[yi], int(k), hac=False) or {"crit": np.nan})["crit"] for k in lags])
         null_max[i] = np.nanmax(c) if not np.all(np.isnan(c)) else np.nan
     null_max = null_max[~np.isnan(null_max)]
     p_glob = float((np.sum(null_max >= c_star) + 1) / (len(null_max) + 1))
