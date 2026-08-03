@@ -1,4 +1,4 @@
-import leadlad_ccf from leadlag.py
+from leadlad_ccf import leadlag.py
 
 
 #crée un dico qui regroupe toutes les variables à tester comme predictrices. ATTENTION : fait pour GDP, modifier le in range(2,33) pour les autres#
