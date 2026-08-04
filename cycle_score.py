@@ -500,3 +500,10 @@ def phase_3blocs(score_avance: float, score_coincident: float,
     accel = score_avance >= seuil
     return {(True, True): "Explosion", (True, False): "Ralentissement",
             (False, True): "Reprise", (False, False): "Decrochage"}[(haut, accel)]
+
+def panel_data(fichier_csv,nom_col):     
+    panel=pd.read_csv(fichier_csv)
+    panel.index=panel[nom_col]
+    panel.drop(columns=nom_col,inplace=True)
+    panel=panel.dropna()
+    return panel
