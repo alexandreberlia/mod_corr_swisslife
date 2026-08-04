@@ -409,27 +409,49 @@ def _appliquer_transform(s: pd.Series, transform: str | None) -> pd.Series:
 
 # format : nom_colonne -> (signe, poids, transform)
 BLOC_AVANCE = {
-    "NAPMPMI Index":  (+1, 2.5, None),    # ISM manufacturier
-    "CHPMINDX Index": (+1, 1.5, None),    # PMI de Chicago
-    "OUTFGAF Index":  (+1, 1.5, None),    # nouvelles commandes
-    "CONSSENT Index": (+1, 2.0, None),    # sentiment des menages (Michigan)
-    "CONCCONF Index": (+1, 1.5, None),    # confiance des menages
+    "NAPMPMI Index":  (+1, 2.5, None),    # ISM manufacturier 0.05
+    "CHPMINDX Index": (+1, 1.5, None),    # PMI de Chicago 0.05
+    "OUTFGAF Index":  (+1, 1.5, None),    # nouvelles commandes 0.05
+    "CONSSENT Index": (+1, 2.0, None),    # sentiment des menages (Michigan) 0.05
+    "CONCCONF Index": (+1, 1.5, None),    # confiance des menages 0.1
 }
 
 BLOC_COINCIDENT = {
-    "GDP CYOY Index": (+1, 3.0, None),    # PIB, glissement annuel
-    "IP  YOY Index":  (+1, 2.5, None),    # production industrielle
-    "USURTOT Index":  (-1, 2.5, None),    # chomage (inverse)
-    "PCE CHNC Index": (+1, 1.5, None),    # consommation des menages
-    "SAARTOTL Index": (+1, 1.0, None),    # ventes automobiles
+    "GDP CYOY Index": (+1, 3.0, None),    # PIB, glissement annuel 0.1
+    "IP  YOY Index":  (+1, 2.5, None),    # production industrielle 0.05
+    "USURTOT Index":  (-1, 2.5, None),    # chomage (inverse) 0.15
+    "PCE CHNC Index": (+1, 1.5, None),    # consommation des menages 0.1
+    "SAARTOTL Index": (+1, 1.0, None),    # ventes automobiles 0.05
 }
 
 BLOC_RETARDE = {
-    "CPI XYOY Index": (+1, 2.0, "d4"),    # acceleration de l'inflation sous-jacente
-    "PCE CYOY Index": (+1, 2.0, "d4"),    # idem, deflateur PCE
-    "FED FUNDS":      (+1, 2.0, "d4"),    # resserrement cumule sur un an
+    "CPI XYOY Index": (+1, 2.0, "d4"),    # acceleration de l'inflation sous-jacente 0.05
+    "PCE CYOY Index": (+1, 2.0, "d4"),    # idem, deflateur PCE 0.05
+    "FED FUNDS":      (+1, 2.0, "d4"),    # resserrement cumule sur un an 0.15
 }
 
+poids_avance = {
+    "NAPMPMI Index":  (+1, 0.17, None),   
+    "CHPMINDX Index": (+1, 0.17, None),   
+    "OUTFGAF Index":  (+1, 0.17, None),   
+    "CONSSENT Index": (+1, 0.17, None),
+    "CONCCONF Index": (+1, 0.32, None),
+}
+
+poids_coincident = {
+    "GDP CYOY Index": (+1, 0.222, None),   
+    "IP  YOY Index":  (+1, 0.111, None),    
+    "USURTOT Index":  (-1, 0.333, None),   
+    "SAARTOTL Index": (+1, 0.122, None),
+    "PCE CHNC Index": (+1, 0.222, None)
+
+}
+
+poids_retarde = {
+    "CPI XYOY Index": (+1, 0.2, "d4"),   
+    "PCE CYOY Index": (+1, 0.2, "d4"),    
+    "FED FUNDS":      (+1, 0.6, "d4"),
+}
 
 def _agreger_3champs(panel, spec, rolling, couverture_min):
     manquantes = [k for k in spec if k not in panel.columns]
@@ -452,7 +474,7 @@ def _agreger_3champs(panel, spec, rolling, couverture_min):
 def build_score_3blocs(panel: pd.DataFrame,
                        avance: dict = None, coincident: dict = None,
                        retarde: dict = None,
-                       poids_globaux=(0.40, 0.45, 0.15),
+                       poids_globaux=(0.30, 0.45, 0.25),
                        rolling: int | None = None,
                        couverture_min: float = 0.60) -> pd.DataFrame:
     """Score 0-100 a trois blocs : avance, coincident, retarde.
@@ -490,6 +512,7 @@ def build_score_3blocs(panel: pd.DataFrame,
                           + pr * df.score_retarde) / tot
     df.attrs["poids"] = poids
     df.attrs["contrib"] = contrib
+    df.index=panel.index.copy()
     return df
 
 
@@ -500,10 +523,9 @@ def phase_3blocs(score_avance: float, score_coincident: float,
     accel = score_avance >= seuil
     return {(True, True): "Explosion", (True, False): "Ralentissement",
             (False, True): "Reprise", (False, False): "Decrochage"}[(haut, accel)]
-
-def panel_data(fichier_csv,nom_col):     
+def panel_data(fichier_csv):     
     panel=pd.read_csv(fichier_csv)
-    panel.index=panel[nom_col]
-    panel.drop(columns=nom_col,inplace=True)
+    panel.index=panel["periode_Q"]
+    panel.drop(columns="periode_Q",inplace=True)
     panel=panel.dropna()
     return panel
