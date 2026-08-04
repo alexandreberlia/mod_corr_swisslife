@@ -230,3 +230,273 @@ def libelle(score: float) -> str:
     if score >= 15:
         return "Contraction"
     return "Contraction severe (bas 15 % historique)"
+
+
+# ---------------------------------------------------------------------------
+# Poids fixes definis par l'utilisateur
+# ---------------------------------------------------------------------------
+# Chaque composante est decrite par (signe, poids) :
+#   signe : +1 si une hausse de la serie = economie plus forte, -1 sinon
+#   poids : importance relative. Les poids sont RENORMALISES pour sommer a 1,
+#           donc seules leurs proportions comptent — (2, 1, 1) equivaut a
+#           (0.5, 0.25, 0.25).
+#
+# Pourquoi cette option : l'ACP pondere par la VARIANCE PARTAGEE, ce qui
+# penalise mecaniquement toute variable porteuse d'information orthogonale
+# (chomage 0.029, pente des taux 0.036 dans la version ACP). Or c'est
+# precisement cette orthogonalite qui fait leur interet. Des poids explicites
+# rendent le choix editorial visible et discutable, au lieu de le deleguer a
+# une decomposition spectrale.
+#
+# C'est aussi la position du Conference Board pour le LEI : ponderation par
+# l'inverse de la volatilite plutot que par ACP, afin qu'aucune composante ne
+# domine du seul fait de son amplitude.
+
+POIDS_NIVEAU_DEFAUT = {
+    "CFNAI Index":    (+1, 3.0),   # composite de 85 series : le socle
+    "USURTOT Index":  (-1, 2.0),   # chomage — remonte a 2.0 vs 0.03 en ACP
+    "IP  YOY Index":  (+1, 2.0),
+    "NFP TCH Index":  (+1, 2.0),
+    "NAPMPMI Index":  (+1, 1.0),   # enquete : reactive mais bruitee
+}
+
+POIDS_MOMENTUM_DEFAUT = {
+    "LEI YOY Index":  (+1, 3.0),   # indice avance de reference
+    "T10Y3M":         (+1, 2.5),   # pente — remontee vs 0.04 en ACP
+    "Housing Permit": (+1, 2.0),   # variable reelle la plus avancee (Leamer)
+    "OUTFGAF Index":  (+1, 1.5),
+    "CHPMINDX Index": (+1, 1.0),
+    "CONCCONF Index": (+1, 1.0),
+}
+
+
+def _agreger_poids_fixes(panel: pd.DataFrame, spec: dict,
+                         rolling: int | None, couverture_min: float):
+    """Agregation a poids imposes.
+
+    spec : {nom_colonne: (signe, poids)}. Les colonnes absentes du panel sont
+    signalees puis ignorees — un silence ici masquerait une faute de frappe
+    dans un nom de serie.
+    """
+    manquantes = [k for k in spec if k not in panel.columns]
+    if manquantes:
+        warnings.warn("Composantes absentes du panel, ignorees : "
+                      + ", ".join(manquantes))
+    dispo = {k: v for k, v in spec.items() if k in panel.columns}
+    if not dispo:
+        raise ValueError("Aucune composante presente dans le panel.")
+
+    Z = pd.DataFrame({k: _z(panel[k], s, rolling) for k, (s, _) in dispo.items()})
+    w = pd.Series({k: float(p) for k, (_, p) in dispo.items()})
+    if (w < 0).any():
+        raise ValueError("Les poids doivent etre positifs ; le sens s'exprime "
+                         "par le signe (+1/-1), pas par un poids negatif.")
+    if w.sum() <= 0:
+        raise ValueError("La somme des poids doit etre strictement positive.")
+    w = w / w.sum()
+
+    num = (Z * w).sum(axis=1, min_count=1)
+    den = Z.notna().mul(w, axis=1).sum(axis=1)
+    couv = den / w.sum()
+    comp = (num / den.replace(0, np.nan)).where(couv >= couverture_min)
+    return comp, w, couv.round(2)
+
+
+def build_score_poids_fixes(panel: pd.DataFrame,
+                            poids_niveau_spec: dict = None,
+                            poids_momentum_spec: dict = None,
+                            poids_niveau: float = 0.5,
+                            rolling: int | None = None,
+                            couverture_min: float = 0.60) -> pd.DataFrame:
+    """Score cyclique 0-100 a ponderation IMPOSEE (aucune ACP).
+
+    Parameters
+    ----------
+    poids_niveau_spec, poids_momentum_spec : dict
+        {nom_colonne: (signe, poids)}. Voir POIDS_NIVEAU_DEFAUT pour le format.
+        Les poids sont renormalises : seules leurs proportions comptent.
+    poids_niveau : float
+        Part du sous-score de niveau dans le score global.
+    rolling : int | None
+        None = z-scores plein echantillon (retrospectif).
+        40  = fenetre glissante de 10 ans. Contrairement a la version ACP, ce
+        reglage suffit ici a rendre le score utilisable en temps reel : les
+        poids etant imposes, ils n'incorporent aucune information future.
+    couverture_min : float
+        Part minimale du poids disponible pour publier un score.
+
+    Returns
+    -------
+    DataFrame : score_niveau, score_momentum, score_global, z_*, couv_*
+        .attrs["poids"]  : poids normalises effectivement appliques
+        .attrs["contrib"]: contribution de chaque composante, par date
+    """
+    specs = {"niveau": poids_niveau_spec or POIDS_NIVEAU_DEFAUT,
+             "momentum": poids_momentum_spec or POIDS_MOMENTUM_DEFAUT}
+    out, poids, contrib = {}, {}, {}
+    for nom, spec in specs.items():
+        comp, w, couv = _agreger_poids_fixes(panel, spec, rolling, couverture_min)
+        out[f"score_{nom}"] = _vers_100(comp)
+        out[f"z_{nom}"] = (comp - comp.mean()) / comp.std(ddof=1)
+        out[f"couv_{nom}"] = couv
+        poids[nom] = w.round(4)
+        dispo = {k: v for k, v in spec.items() if k in panel.columns}
+        Z = pd.DataFrame({k: _z(panel[k], s, rolling) for k, (s, _) in dispo.items()})
+        contrib[nom] = (Z * w).round(4)
+    df = pd.DataFrame(out)
+    df["score_global"] = (poids_niveau * df["score_niveau"]
+                          + (1 - poids_niveau) * df["score_momentum"])
+    df.attrs["poids"] = poids
+    df.attrs["contrib"] = contrib
+    return df
+
+
+def decomposer(scores: pd.DataFrame, date, bloc: str = "niveau") -> pd.DataFrame:
+    """Contribution de chaque composante au score d'une date donnee.
+
+    Repond a « pourquoi le score a-t-il baisse ? » : chaque ligne donne le
+    z-score de la composante, son poids, et le produit des deux. La somme des
+    contributions reconstitue le score brut.
+    """
+    c = scores.attrs.get("contrib", {}).get(bloc)
+    if c is None:
+        raise ValueError("Scores construits sans contributions "
+                         "(utilisez build_score_poids_fixes).")
+    d = pd.Period(date, freq="Q") if not isinstance(date, pd.Period) else date
+    if d not in c.index:
+        raise KeyError(f"{d} absent. Plage : {c.index.min()} -> {c.index.max()}")
+    w = scores.attrs["poids"][bloc]
+    row = c.loc[d]
+    t = pd.DataFrame({"poids": w, "contribution": row})
+    t["z_composante"] = (t.contribution / t.poids.replace(0, np.nan)).round(2)
+    t["part_%"] = (100 * t.contribution / t.contribution.sum()).round(1)
+    return t.sort_values("contribution").round(4)
+
+
+# ---------------------------------------------------------------------------
+# Configuration a trois blocs (avance / coincident / retarde)
+# ---------------------------------------------------------------------------
+# Reprend la tripartition du Conference Board (leading / coincident / lagging).
+# Le bloc RETARDE — inflation et taux directeur — n'est pas un bloc d'activite :
+# il monte APRES l'acceleration et redescend APRES le retournement. Il ne mesure
+# donc pas ou en est le cycle mais A QUEL POINT IL EST AVANCE. Un bloc retarde
+# eleve alors que le bloc avance flechit est la signature classique de fin de
+# cycle : la banque centrale resserre encore alors que les commandes ralentissent
+# deja.
+#
+# TRANSFORMATIONS. Inflation et Fed funds sont non stationnaires en niveau (leur
+# glissement annuel porte quarante ans de desinflation). On les prend en
+# VARIATION SUR 4 TRIMESTRES : l'acceleration de l'inflation, le resserrement
+# cumule sur un an. Le champ transform le precise.
+#
+# SIGNES. Dans un score CYCLIQUE, une inflation qui accelere et une banque
+# centrale qui resserre signalent une economie qui tourne au-dessus de son
+# potentiel : signe +1. Ce n'est pas un jugement de bien-etre — c'est une
+# mesure de position dans le cycle. Si l'objectif etait un score de « sante
+# economique », le signe serait a inverser.
+
+def _appliquer_transform(s: pd.Series, transform: str | None) -> pd.Series:
+    if transform in (None, "niveau"):
+        return s
+    if transform == "d4":
+        return s.diff(4)
+    if transform == "d1":
+        return s.diff()
+    if transform == "rdt4":
+        return 100.0 * (s / s.shift(4) - 1.0)
+    raise ValueError(f"transform inconnu : {transform!r}")
+
+
+# format : nom_colonne -> (signe, poids, transform)
+BLOC_AVANCE = {
+    "NAPMPMI Index":  (+1, 2.5, None),    # ISM manufacturier
+    "CHPMINDX Index": (+1, 1.5, None),    # PMI de Chicago
+    "OUTFGAF Index":  (+1, 1.5, None),    # nouvelles commandes
+    "CONSSENT Index": (+1, 2.0, None),    # sentiment des menages (Michigan)
+    "CONCCONF Index": (+1, 1.5, None),    # confiance des menages
+}
+
+BLOC_COINCIDENT = {
+    "GDP CYOY Index": (+1, 3.0, None),    # PIB, glissement annuel
+    "IP  YOY Index":  (+1, 2.5, None),    # production industrielle
+    "USURTOT Index":  (-1, 2.5, None),    # chomage (inverse)
+    "PCE CHNC Index": (+1, 1.5, None),    # consommation des menages
+    "SAARTOTL Index": (+1, 1.0, None),    # ventes automobiles
+}
+
+BLOC_RETARDE = {
+    "CPI XYOY Index": (+1, 2.0, "d4"),    # acceleration de l'inflation sous-jacente
+    "PCE CYOY Index": (+1, 2.0, "d4"),    # idem, deflateur PCE
+    "FED FUNDS":      (+1, 2.0, "d4"),    # resserrement cumule sur un an
+}
+
+
+def _agreger_3champs(panel, spec, rolling, couverture_min):
+    manquantes = [k for k in spec if k not in panel.columns]
+    if manquantes:
+        warnings.warn("Absentes du panel, ignorees : " + ", ".join(manquantes))
+    dispo = {k: v for k, v in spec.items() if k in panel.columns}
+    if not dispo:
+        raise ValueError("Aucune composante presente dans le panel.")
+    Z = pd.DataFrame({k: _z(_appliquer_transform(panel[k], tr), sg, rolling)
+                      for k, (sg, _, tr) in dispo.items()})
+    w = pd.Series({k: float(p) for k, (_, p, _) in dispo.items()})
+    w = w / w.sum()
+    num = (Z * w).sum(axis=1, min_count=1)
+    den = Z.notna().mul(w, axis=1).sum(axis=1)
+    couv = den / w.sum()
+    comp = (num / den.replace(0, np.nan)).where(couv >= couverture_min)
+    return comp, w, couv.round(2), Z
+
+
+def build_score_3blocs(panel: pd.DataFrame,
+                       avance: dict = None, coincident: dict = None,
+                       retarde: dict = None,
+                       poids_globaux=(0.40, 0.45, 0.15),
+                       rolling: int | None = None,
+                       couverture_min: float = 0.60) -> pd.DataFrame:
+    """Score 0-100 a trois blocs : avance, coincident, retarde.
+
+    Parameters
+    ----------
+    avance, coincident, retarde : dict
+        {nom_colonne: (signe, poids, transform)}. transform vaut None, "d4",
+        "d1" ou "rdt4". Les poids sont renormalises par bloc.
+    poids_globaux : tuple
+        Ponderation (avance, coincident, retarde) dans le score global. Le bloc
+        retarde recoit un poids faible : il documente la position dans le cycle,
+        il ne mesure pas son intensite.
+
+    Returns
+    -------
+    DataFrame : score_avance, score_coincident, score_retarde, score_global,
+                z_*, couv_*.  .attrs["poids"] et .attrs["contrib"].
+    """
+    specs = {"avance": avance or BLOC_AVANCE,
+             "coincident": coincident or BLOC_COINCIDENT,
+             "retarde": retarde or BLOC_RETARDE}
+    out, poids, contrib = {}, {}, {}
+    for nom, sp in specs.items():
+        comp, w, couv, Z = _agreger_3champs(panel, sp, rolling, couverture_min)
+        out[f"score_{nom}"] = _vers_100(comp)
+        out[f"z_{nom}"] = (comp - comp.mean()) / comp.std(ddof=1)
+        out[f"couv_{nom}"] = couv
+        poids[nom] = w.round(4)
+        contrib[nom] = (Z * w).round(4)
+    df = pd.DataFrame(out)
+    pa, pc, pr = poids_globaux
+    tot = pa + pc + pr
+    df["score_global"] = (pa * df.score_avance + pc * df.score_coincident
+                          + pr * df.score_retarde) / tot
+    df.attrs["poids"] = poids
+    df.attrs["contrib"] = contrib
+    return df
+
+
+def phase_3blocs(score_avance: float, score_coincident: float,
+                 seuil: float = 50.0) -> str:
+    """Phase deduite du croisement coincident (niveau) x avance (direction)."""
+    haut = score_coincident >= seuil
+    accel = score_avance >= seuil
+    return {(True, True): "Explosion", (True, False): "Ralentissement",
+            (False, True): "Reprise", (False, False): "Decrochage"}[(haut, accel)]
