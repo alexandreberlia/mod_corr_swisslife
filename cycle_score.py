@@ -1,0 +1,232 @@
+"""cycle_score.py — Score cyclique 0-100 de l'etat de l'economie.
+
+Prolonge le decoupage en 4 phases (niveau x momentum) par un score continu.
+
+Filiation methodologique
+------------------------
+- CFNAI (Fed de Chicago) : premiere composante principale d'un grand nombre de
+  series, standardisee (moyenne 0, ecart-type 1). Seuils calibres sur les
+  recessions NBER : -0.70 (entree probable en recession), +0.20 (sortie),
+  +0.70 (surchauffe/pressions inflationnistes). On reprend l'ACP et l'idee de
+  seuils calibres empiriquement plutot que fixes a priori.
+- CLI de l'OCDE : normalisation puis recalage sur une moyenne de long terme
+  fixee a 100, « amplitude adjusted ». On reprend le principe du recalage sur
+  une echelle bornee et lisible, mais sur 0-100 plutot que autour de 100.
+- Conference Board LEI : distinction leading / coincident. On la reprend en
+  separant DEUX sous-scores plutot qu'un seul agregat, parce que le decoupage
+  en phases repose precisement sur le croisement de deux dimensions.
+
+Architecture
+------------
+    SCORE_NIVEAU    ou en est l'activite par rapport a sa tendance   (coincident)
+    SCORE_MOMENTUM  dans quelle direction elle va                    (avance)
+    SCORE_GLOBAL    moyenne ponderee des deux
+
+Chaque sous-score est construit ainsi :
+    1. selection de composantes stationnaires et validees comme predictives
+    2. z-score de chaque composante, signe aligne (un z eleve = economie forte)
+    3. agregation par premiere composante principale (a la CFNAI)
+    4. conversion en 0-100 par la fonction de repartition normale :
+           score = 100 * Phi(z)
+       Ce choix n'est pas cosmetique. Un min-max serait ecrase par les valeurs
+       extremes de 2008 et 2020 ; Phi(z) donne un PERCENTILE HISTORIQUE, donc
+       « 40 » se lit « plus faible que 60 % des trimestres depuis 1970 ».
+       Un mouvement de 45 a 55 traverse la zone dense de la distribution et
+       represente un vrai changement d'etat ; de 85 a 95, on est deja dans la
+       queue et l'ecart est moins significatif.
+
+Les seuils de phase ne sont PAS fixes a priori : ils sont calibres sur la
+distribution empirique du score dans chaque phase du decoupage de reference.
+
+Dependances : numpy, pandas, scipy
+"""
+
+from __future__ import annotations
+
+import warnings
+
+import numpy as np
+import pandas as pd
+from scipy import stats
+
+warnings.filterwarnings("ignore")
+
+
+# ---------------------------------------------------------------------------
+# Composantes
+# ---------------------------------------------------------------------------
+# signe +1 : une hausse de la serie = economie plus forte
+# signe -1 : une hausse = economie plus faible (chomage, inscriptions)
+
+COMPOSANTES_NIVEAU = {
+    "CFNAI Index": +1,        # indice d'activite composite, coincident par construction
+    "IP  YOY Index": +1,      # production industrielle, glissement annuel
+    "NFP TCH Index": +1,      # creations d'emplois
+    "USURTOT Index": -1,      # taux de chomage (inverse)
+    "NAPMPMI Index": +1,      # ISM manufacturier
+}
+
+COMPOSANTES_MOMENTUM = {
+    "LEI YOY Index": +1,      # indice avance du Conference Board
+    "OUTFGAF Index": +1,      # nouvelles commandes (Philly Fed)
+    "Housing Permit": +1,     # permis de construire — la variable reelle la plus avancee
+    "T10Y3M": +1,             # pente des taux
+    "CONCCONF Index": +1,     # confiance des menages
+    "CHPMINDX Index": +1,     # PMI de Chicago
+}
+
+
+def _z(s: pd.Series, sens: int, win: int | None = None) -> pd.Series:
+    """Z-score, oriente. `win` active un z-score glissant (evite le biais de
+    reconstruction retrospective : a une date donnee on n'utilise que le passe)."""
+    x = s.astype(float) * sens
+    if win:
+        m = x.rolling(win, min_periods=max(20, win // 3)).mean()
+        sd = x.rolling(win, min_periods=max(20, win // 3)).std(ddof=1)
+    else:
+        m, sd = x.mean(), x.std(ddof=1)
+    return (x - m) / sd.replace(0, np.nan) if isinstance(sd, pd.Series) else (x - m) / sd
+
+
+def _acp_premier_axe(Z: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    """Premiere composante principale sur donnees standardisees (methode CFNAI).
+
+    Les poids sont le premier vecteur propre de la matrice de correlation. Le
+    signe est fixe pour que la composante soit positivement correlee a la moyenne
+    simple des composantes — sinon l'ACP peut renvoyer l'axe inverse.
+    """
+    M = Z.dropna(how="all")
+    C = M.corr()
+    if C.isna().any().any():
+        C = C.fillna(0.0)
+        np.fill_diagonal(C.values, 1.0)
+    vals, vecs = np.linalg.eigh(C.to_numpy())
+    w = vecs[:, np.argmax(vals)]
+    if np.corrcoef(np.nan_to_num(M.to_numpy()) @ w,
+                   np.nan_to_num(M.mean(axis=1).to_numpy()))[0, 1] < 0:
+        w = -w
+    poids = pd.Series(w / np.abs(w).sum(), index=M.columns)
+    # Moyenne ponderee sur les composantes DISPONIBLES a chaque date : une serie
+    # qui demarre tard ne penalise pas les dates anterieures.
+    num = (M * poids).sum(axis=1, min_count=1)
+    den = M.notna().mul(poids.abs(), axis=1).sum(axis=1)
+    comp = num / den.replace(0, np.nan)
+    return comp, poids
+
+
+def _vers_100(z: pd.Series) -> pd.Series:
+    """z -> 0-100 par la fonction de repartition normale : un percentile."""
+    zz = (z - z.mean()) / z.std(ddof=1)
+    return pd.Series(100.0 * stats.norm.cdf(zz.to_numpy()), index=z.index)
+
+
+# ---------------------------------------------------------------------------
+# Construction
+# ---------------------------------------------------------------------------
+
+def build_score(panel: pd.DataFrame,
+                comp_niveau: dict = None, comp_momentum: dict = None,
+                poids_niveau: float = 0.5, rolling: int | None = None,
+                couverture_min: float = 0.60) -> pd.DataFrame:
+    """Construit les trois scores.
+
+    Parameters
+    ----------
+    rolling : int | None
+        None = z-score plein echantillon (analyse retrospective).
+        40   = z-score glissant sur 10 ans, seule version honnete pour un
+               backtest, puisqu'a chaque date on n'utilise que le passe.
+    couverture_min : part MINIMALE du poids total qui doit etre disponible pour
+        qu'un score soit publie. Point critique : les series macro n'ont pas
+        toutes la meme date de fin (« bord droit en dents de scie »). Sans ce
+        garde-fou, les derniers trimestres seraient calcules sur deux ou trois
+        composantes seulement et compares a un historique construit sur dix —
+        ce qui produit des valeurs erratiques indiscernables d'un vrai
+        mouvement cyclique. Les colonnes couv_* rapportent cette part.
+    """
+    cn = comp_niveau or COMPOSANTES_NIVEAU
+    cm = comp_momentum or COMPOSANTES_MOMENTUM
+    out, detail = {}, {}
+    for nom, comps in (("niveau", cn), ("momentum", cm)):
+        dispo = {k: v for k, v in comps.items() if k in panel.columns}
+        if not dispo:
+            raise ValueError(f"Aucune composante '{nom}' presente dans le panel.")
+        Z = pd.DataFrame({k: _z(panel[k], v, rolling) for k, v in dispo.items()})
+        comp, poids = _acp_premier_axe(Z)
+        couv = Z.notna().mul(poids.abs(), axis=1).sum(axis=1) / poids.abs().sum()
+        comp = comp.where(couv >= couverture_min)
+        out[f"score_{nom}"] = _vers_100(comp)
+        out[f"z_{nom}"] = (comp - comp.mean()) / comp.std(ddof=1)
+        out[f"couv_{nom}"] = couv.round(2)
+        detail[nom] = poids
+    df = pd.DataFrame(out)
+    df["score_global"] = (poids_niveau * df["score_niveau"]
+                          + (1 - poids_niveau) * df["score_momentum"])
+    df.attrs["poids"] = detail
+    return df
+
+
+def calibrer_coupure(score_niveau, score_momentum, phases) -> dict:
+    """Cherche les coupures qui reproduisent le mieux le decoupage de reference.
+
+    Fixer la coupure a 50 est arbitraire : rien ne garantit que la mediane du
+    score coincide avec la frontiere du decoupage Hamilton. On balaie donc les
+    deux coupures et on retient le couple qui maximise la concordance.
+    """
+    d = pd.concat([score_niveau.rename("n"), score_momentum.rename("m"),
+                   phases.rename("ph")], axis=1).dropna()
+    d = d[d.ph != "Choc Covid"]
+    best = (50.0, 50.0, -1.0)
+    for cn in np.arange(25, 76, 2.5):
+        for cm in np.arange(25, 76, 2.5):
+            pred = np.where(d.n >= cn,
+                            np.where(d.m >= cm, "Explosion", "Ralentissement"),
+                            np.where(d.m >= cm, "Reprise", "Decrochage"))
+            acc = float((pred == d.ph.to_numpy()).mean())
+            if acc > best[2]:
+                best = (float(cn), float(cm), acc)
+    return dict(coupure_niveau=best[0], coupure_momentum=best[1],
+                concordance=round(best[2], 3), n=len(d))
+
+
+def calibrer_seuils(score: pd.Series, phases: pd.Series) -> pd.DataFrame:
+    """Distribution empirique du score dans chaque phase de reference.
+
+    Les seuils sortent des DONNEES, ils ne sont pas poses a priori : c'est la
+    demarche du CFNAI, dont les seuils -0.70 / +0.20 / +0.70 ont ete calibres
+    sur les recessions NBER, non choisis pour leur elegance.
+    """
+    d = pd.concat([score.rename("s"), phases.rename("ph")], axis=1).dropna()
+    t = d.groupby("ph")["s"].describe(percentiles=[0.1, 0.25, 0.5, 0.75, 0.9])
+    return t[["count", "min", "10%", "25%", "50%", "75%", "90%", "max"]].round(1)
+
+
+def classer(score_niveau: float, score_momentum: float, seuil: float = 50.0) -> str:
+    """Phase deduite du croisement des deux sous-scores — meme logique que le
+    decoupage binaire d'origine, mais avec des scores continus."""
+    haut = score_niveau >= seuil
+    accel = score_momentum >= seuil
+    if haut and accel:
+        return "Explosion"
+    if haut and not accel:
+        return "Ralentissement"
+    if not haut and accel:
+        return "Reprise"
+    return "Decrochage"
+
+
+def libelle(score: float) -> str:
+    """Lecture qualitative. Bornes fondees sur les percentiles de la loi normale."""
+    if score >= 85:
+        return "Surchauffe (top 15 % historique)"
+    if score >= 70:
+        return "Expansion soutenue"
+    if score >= 55:
+        return "Expansion moderee"
+    if score >= 45:
+        return "Neutre / proche de la tendance"
+    if score >= 30:
+        return "Ralentissement"
+    if score >= 15:
+        return "Contraction"
+    return "Contraction severe (bas 15 % historique)"
