@@ -59,20 +59,22 @@ warnings.filterwarnings("ignore")
 # signe -1 : une hausse = economie plus faible (chomage, inscriptions)
 
 COMPOSANTES_NIVEAU = {
-    "CFNAI Index": +1,        # indice d'activite composite, coincident par construction
-    "IP  YOY Index": +1,      # production industrielle, glissement annuel
-    "NFP TCH Index": +1,      # creations d'emplois
-    "USURTOT Index": -1,      # taux de chomage (inverse)
-    "NAPMPMI Index": +1,      # ISM manufacturier
+    "OUTFAG Index": +1,           # Commandes à l'industrie
+    "CFNAI Index": +1,     #Indice national d'activité de la Fed de Chicago
+    "RCHSINDX Index": +1,      #Enquête manufacturière de la Fed de Richmond
+    "CONSSENT Index": +1,    #Indice de sentiment des consommateurs
+    "NAPMPMI Index": +1,   # Indice ISM manufacturier
+    "Housing Permit": +1,   # permis de construire — la variable reelle la plus avancee
+    "NHSPATOT Index": +1,     #Ventes de logements neufs
+    "LEI YOY Index": +1      #Indicateur avancé de l'économie sur un an
 }
 
 COMPOSANTES_MOMENTUM = {
-    "LEI YOY Index": +1,      # indice avance du Conference Board
-    "OUTFGAF Index": +1,      # nouvelles commandes (Philly Fed)
-    "Housing Permit": +1,     # permis de construire — la variable reelle la plus avancee
-    "T10Y3M": +1,             # pente des taux
-    "CONCCONF Index": +1,     # confiance des menages
-    "CHPMINDX Index": +1,     # PMI de Chicago
+    "CHPMINDX Index": +1,      # Indice PMI de Chicago
+    "NAPMPMI Index": +1,      # Indice ISM manufacturier
+    "CFNAI Index": +1,     # permis de construire — la variable reelle la plus avancee
+    "OUTFGAF Index": +1,             # Commandes à l'industrie
+    "PCE CHNC Index": +1,
 }
 
 
@@ -253,20 +255,22 @@ def libelle(score: float) -> str:
 # domine du seul fait de son amplitude.
 
 POIDS_NIVEAU_DEFAUT = {
-    "CFNAI Index":    (+1, 3.0),   # composite de 85 series : le socle
-    "USURTOT Index":  (-1, 2.0),   # chomage — remonte a 2.0 vs 0.03 en ACP
-    "IP  YOY Index":  (+1, 2.0),
-    "NFP TCH Index":  (+1, 2.0),
-    "NAPMPMI Index":  (+1, 1.0),   # enquete : reactive mais bruitee
+    "OUTFAG Index": (+1, 0.1509),           # Commandes à l'industrie
+    "CFNAI Index": (+1, 0.1491),   #Indice national d'activité de la Fed de Chicago
+    "RCHSINDX Index": (+1, 0.1477),      #Enquête manufacturière de la Fed de Richmond
+    "CONSSENT Index": (+1, 0.0698),   #Indice de sentiment des consommateurs
+    "NAPMPMI Index": (+1,0.0680),   # Indice ISM manufacturier
+    "Housing Permit": (+1, 0.1363),  # permis de construire — la variable reelle la plus avancee
+    "NHSPATOT Index": (+1, 0.0698),    #Ventes de logements neufs
+    "LEI YOY Index": (+1, 0.1420)     #Indicateur avancé de l'économie sur un an
 }
 
 POIDS_MOMENTUM_DEFAUT = {
-    "LEI YOY Index":  (+1, 3.0),   # indice avance de reference
-    "T10Y3M":         (+1, 2.5),   # pente — remontee vs 0.04 en ACP
-    "Housing Permit": (+1, 2.0),   # variable reelle la plus avancee (Leamer)
-    "OUTFGAF Index":  (+1, 1.5),
-    "CHPMINDX Index": (+1, 1.0),
-    "CONCCONF Index": (+1, 1.0),
+    "CHPMINDX Index": (+1,0.182378),      # Indice PMI de Chicago
+    "NAPMPMI Index": (+1,0.176532),      # Indice ISM manufacturier
+    "CFNAI Index": (+1,0.411570),     # permis de construire — la variable reelle la plus avancee
+    "OUTFGAF Index": (+1,0.113310),           # Commandes à l'industrie
+    "PCE CHNC Index": (+1, 0.116210),
 }
 
 
@@ -409,49 +413,27 @@ def _appliquer_transform(s: pd.Series, transform: str | None) -> pd.Series:
 
 # format : nom_colonne -> (signe, poids, transform)
 BLOC_AVANCE = {
-    "NAPMPMI Index":  (+1, 2.5, None),    # ISM manufacturier 0.05
-    "CHPMINDX Index": (+1, 1.5, None),    # PMI de Chicago 0.05
-    "OUTFGAF Index":  (+1, 1.5, None),    # nouvelles commandes 0.05
-    "CONSSENT Index": (+1, 2.0, None),    # sentiment des menages (Michigan) 0.05
-    "CONCCONF Index": (+1, 1.5, None),    # confiance des menages 0.1
+    "NAPMPMI Index":  (+1, 0.17, None),    # ISM manufacturier 0.05
+    "CHPMINDX Index": (+1, 0.17, None),    # PMI de Chicago 0.05
+    "OUTFGAF Index":  (+1, 0.17, None),    # nouvelles commandes 0.05
+    "CONSSENT Index": (+1, 0.17, None),    # sentiment des menages (Michigan) 0.05
+    "CONCCONF Index": (+1, 0.32, None),    # confiance des menages 0.1
 }
 
 BLOC_COINCIDENT = {
-    "GDP CYOY Index": (+1, 3.0, None),    # PIB, glissement annuel 0.1
-    "IP  YOY Index":  (+1, 2.5, None),    # production industrielle 0.05
-    "USURTOT Index":  (-1, 2.5, None),    # chomage (inverse) 0.15
-    "PCE CHNC Index": (+1, 1.5, None),    # consommation des menages 0.1
-    "SAARTOTL Index": (+1, 1.0, None),    # ventes automobiles 0.05
+    "GDP CYOY Index": (+1, 0.222, None),    # PIB, glissement annuel 0.1
+    "IP  YOY Index":  (+1, 0.111, None),    # production industrielle 0.05
+    "USURTOT Index":  (-1, 0.333, None),    # chomage (inverse) 0.15
+    "PCE CHNC Index": (+1, 0.122, None),    # consommation des menages 0.1
+    "SAARTOTL Index": (+1, 0.222, None),    # ventes automobiles 0.05
 }
 
 BLOC_RETARDE = {
-    "CPI XYOY Index": (+1, 2.0, "d4"),    # acceleration de l'inflation sous-jacente 0.05
-    "PCE CYOY Index": (+1, 2.0, "d4"),    # idem, deflateur PCE 0.05
-    "FED FUNDS":      (+1, 2.0, "d4"),    # resserrement cumule sur un an 0.15
+    "CPI XYOY Index": (+1, 0.2, "d4"),    # acceleration de l'inflation sous-jacente 0.05
+    "PCE CYOY Index": (+1, 0.2, "d4"),    # idem, deflateur PCE 0.05
+    "FED FUNDS":      (+1, 0.6, "d4"),    # resserrement cumule sur un an 0.15
 }
 
-poids_avance = {
-    "NAPMPMI Index":  (+1, 0.17, None),   
-    "CHPMINDX Index": (+1, 0.17, None),   
-    "OUTFGAF Index":  (+1, 0.17, None),   
-    "CONSSENT Index": (+1, 0.17, None),
-    "CONCCONF Index": (+1, 0.32, None),
-}
-
-poids_coincident = {
-    "GDP CYOY Index": (+1, 0.222, None),   
-    "IP  YOY Index":  (+1, 0.111, None),    
-    "USURTOT Index":  (-1, 0.333, None),   
-    "SAARTOTL Index": (+1, 0.122, None),
-    "PCE CHNC Index": (+1, 0.222, None)
-
-}
-
-poids_retarde = {
-    "CPI XYOY Index": (+1, 0.2, "d4"),   
-    "PCE CYOY Index": (+1, 0.2, "d4"),    
-    "FED FUNDS":      (+1, 0.6, "d4"),
-}
 
 def _agreger_3champs(panel, spec, rolling, couverture_min):
     manquantes = [k for k in spec if k not in panel.columns]
@@ -512,7 +494,6 @@ def build_score_3blocs(panel: pd.DataFrame,
                           + pr * df.score_retarde) / tot
     df.attrs["poids"] = poids
     df.attrs["contrib"] = contrib
-    df.index=panel.index.copy()
     return df
 
 
@@ -523,9 +504,3 @@ def phase_3blocs(score_avance: float, score_coincident: float,
     accel = score_avance >= seuil
     return {(True, True): "Explosion", (True, False): "Ralentissement",
             (False, True): "Reprise", (False, False): "Decrochage"}[(haut, accel)]
-def panel_data(fichier_csv):     
-    panel=pd.read_csv(fichier_csv)
-    panel.index=panel["periode_Q"]
-    panel.drop(columns="periode_Q",inplace=True)
-    panel=panel.dropna()
-    return panel
