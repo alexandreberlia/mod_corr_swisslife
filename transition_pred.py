@@ -1,43 +1,40 @@
-"""transitions.py — Quelle sera la prochaine phase, et quand.
+"""cycle_model.py — Modele de cycle economique, interface orientee objet.
 
-Decomposition du probleme
--------------------------
-    P(etre en phase D dans j trimestres)
-        = P(changer avant j)  x  P(destination = D | changement)
+Consolide prevision.py et transitions.py en une seule classe. Le passage a
+l'objet n'est pas cosmetique : l'etat estime (coefficients de hasard, matrice
+de transition, table de recalibration) doit rester solidaire du modele et etre
+reutilise a chaque prevision. Le faire circuler par dictionnaires exposait a
+melanger le hasard d'un ajustement avec la matrice d'un autre.
 
-Les deux termes sont estimes separement, pour une raison de comptage :
+Usage
+-----
+    from cycle_model import CycleModel
 
-  QUAND      modele de duree (cloglog) sur 40 transitions. C'est le module
-             prevision.hazard_phase.
-  VERS QUOI  matrice de transition empirique. Ici l'echantillon est bien plus
-             mince — 8 a 11 sorties par phase, et parfois 2 seulement dans une
-             branche minoritaire.
+    m = CycleModel().fit(phases["phase"])
+    print(m.summary())
+    print(m.predict(H=6))
+    print(m.explain(H=4))
 
-Pourquoi ne PAS estimer un modele a risques concurrents complet
----------------------------------------------------------------
-Un cloglog multinomial exigerait un jeu de coefficients par destination. Or la
-matrice de transition observee est en grande partie DETERMINISTE :
+    # avec covariable
+    m = CycleModel().fit(phases["phase"], exog=pd.DataFrame({"dgno": serie}))
+    print(m.predict(H=4, x={"dgno": 1.2}))
 
-    Explosion   -> Ralentissement  10/10
-    Decrochage  -> Reprise           8/8
-    Reprise     -> Explosion 8/11, Ralentissement 2/11
-    Ralentissement -> Decrochage 7/11, Explosion 2/11
+    # recalibration sur backtest
+    bt = m.backtest(phases["phase"], debut="1990Q1", H=4)
+    m.calibrate(bt)
+    print(m.predict(H=4))          # p_change devient p_change_cal
 
-Deux transitions sur quatre n'ont aucune variabilite a expliquer, et les
-branches minoritaires comptent 2 evenements. Un modele parametrique y serait
-entierement determine par ces deux points. On s'en tient donc a la frequence
-historique, avec un intervalle de credibilite qui dit honnetement ce que 2
-evenements permettent d'affirmer.
+Ce que le modele fait, et ce qu'il ne fait pas
+-----------------------------------------------
+IL FAIT     estimer P(changer de phase dans H trimestres), et la repartition
+            entre destinations si changement.
+IL NE FAIT  PAS predire de facon fiable QUELLE phase on observera. Sur backtest,
+            l'etiquette predite ne bat pas un predicteur trivial « rien ne
+            change ». L'information exploitable est dans la PROBABILITE
+            continue, pas dans le label — d'ou l'accent mis sur `p_change` et
+            sur la recalibration.
 
-Incertitude sur les destinations
---------------------------------
-Frequence brute + posterieur bayesien Dirichlet(1,...,1), c'est-a-dire regle de
-Laplace : (k+1)/(n+K). Deux vertus. Une destination jamais observee recoit une
-probabilite faible mais NON NULLE — l'absence dans 11 episodes ne prouve pas
-l'impossibilite. Et l'intervalle de credibilite s'elargit mecaniquement quand
-les effectifs sont minces, ce qu'une frequence brute masquerait.
-
-Dependances : numpy, pandas, scipy
+Dependances : numpy, pandas, scipy, statsmodels
 """
 
 from __future__ import annotations
@@ -51,163 +48,319 @@ from scipy import stats
 warnings.filterwarnings("ignore")
 
 
+# ---------------------------------------------------------------------------
+# Fonctions utilitaires (publiques : utiles hors du modele)
+# ---------------------------------------------------------------------------
+
 def episodes(phases: pd.Series) -> pd.Series:
+    """Numerote les blocs consecutifs de meme phase."""
     return (phases != phases.shift()).cumsum()
 
 
 def anciennete(phases: pd.Series) -> pd.Series:
+    """Trimestres deja passes dans la phase courante (1 = premier)."""
     ep = episodes(phases)
     return ep.groupby(ep).cumcount() + 1
 
 
-# ---------------------------------------------------------------------------
-# Matrice de transition
-# ---------------------------------------------------------------------------
-
-def matrice_transition(phases: pd.Series, exclure: tuple = ("Choc Covid",),
-                       niveau: float = 0.90) -> dict:
-    """Compte les transitions observees et en deduit les probabilites.
-
-    Returns
-    -------
-    dict : 'comptes', 'probabilites' (posterieur de Laplace), 'intervalles'
-    """
-    p = phases[~phases.isin(exclure)].dropna()
-    ep = episodes(p)
-    suite = [(p[ep == e].iloc[0], p[ep == e + 1].iloc[0])
-             for e in sorted(ep.unique())[:-1] if (ep == e + 1).any()]
-    if not suite:
-        raise ValueError("Aucune transition observee.")
-    dep = sorted({a for a, _ in suite})
-    arr = sorted({b for _, b in suite})
-    C = pd.DataFrame(0, index=dep, columns=arr, dtype=int)
-    for a, b in suite:
-        C.loc[a, b] += 1
-
-    P, IC = C.astype(float).copy(), {}
-    a_lo = (1 - niveau) / 2
-    for d in dep:
-        k = C.loc[d].to_numpy(float)
-        n, K = k.sum(), len(arr)
-        P.loc[d] = (k + 1.0) / (n + K)           # posterieur de Laplace
-        for j, dest in enumerate(arr):
-            # marginale Beta du Dirichlet
-            lo, hi = stats.beta.ppf([a_lo, 1 - a_lo], k[j] + 1, n - k[j] + K - 1)
-            IC[(d, dest)] = (round(float(lo), 3), round(float(hi), 3))
-    return dict(comptes=C, probabilites=P.round(3), intervalles=IC,
-                n_transitions=len(suite))
-
-
-# ---------------------------------------------------------------------------
-# Prevision complete
-# ---------------------------------------------------------------------------
-
-def prevoir_phases(modele_hasard: dict, matrice: dict, phase: str,
-                   t_actuel: int, H: int = 6, x: dict | None = None,
-                   absorbant: bool = True) -> pd.DataFrame:
-    """Repartition de probabilite sur les phases, a chaque horizon.
+class CycleModel:
+    """Modele de duree + matrice de transition pour un decoupage en phases.
 
     Parameters
     ----------
-    modele_hasard : sortie de prevision.hazard_phase
-    matrice : sortie de matrice_transition
-    phase, t_actuel : etat courant et anciennete (en trimestres)
-    x : valeurs des covariables du modele de hasard, si celui-ci en comporte
-    absorbant : si True, on ne modelise PAS les transitions ulterieures. Une
-        fois sortie, la trajectoire s'arrete a la premiere destination. C'est
-        volontaire : chainer les transitions supposerait le processus
-        markovien, hypothese que la dependance de duree contredit — le hasard
-        depend de l'anciennete, pas seulement de la phase.
-
-    Returns
-    -------
-    DataFrame : une ligne par horizon, une colonne par phase.
+    exclure : tuple
+        Phases ecartees de l'estimation (episodes trop courts pour estimer).
+    min_evenements : int
+        En dessous, l'estimation d'une phase est signalee comme instable.
+    lissage : bool
+        Posterieur de Laplace sur la matrice de transition. Une destination
+        jamais observee recoit alors une probabilite faible mais NON NULLE :
+        l'absence sur onze episodes ne prouve pas l'impossibilite.
     """
-    if phase not in modele_hasard:
-        raise KeyError(f"Phase '{phase}' non estimee. "
-                       f"Disponibles : {list(modele_hasard)}")
-    P = matrice["probabilites"]
-    if phase not in P.index:
-        raise KeyError(f"Phase '{phase}' absente de la matrice de transition.")
-    dests = list(P.columns)
-    m = modele_hasard[phase]
-    b, noms = np.asarray(m["params"]), m["noms"]
 
-    lignes, surv = [], 1.0
-    cumul = {d: 0.0 for d in dests}
-    for j in range(1, H + 1):
-        t = t_actuel + j - 1
-        eta = b[0] + b[1] * np.log(t)
-        for k, nom in enumerate(noms[2:], start=2):
+    def __init__(self, exclure: tuple = ("Choc Covid",),
+                 min_evenements: int = 3, lissage: bool = True):
+        self.exclure = exclure
+        self.min_evenements = min_evenements
+        self.lissage = lissage
+        self.hazard_: dict = {}
+        self.transitions_: pd.DataFrame | None = None
+        self.comptes_: pd.DataFrame | None = None
+        self.intervalles_: dict = {}
+        self.exog_noms_: list = []
+        self.phase_courante_: str | None = None
+        self.anciennete_: int | None = None
+        self.calibration_: pd.DataFrame | None = None
+        self._ajuste = False
+
+    # -- estimation ---------------------------------------------------------
+
+    def fit(self, phases: pd.Series, exog: pd.DataFrame | None = None):
+        """Estime le hasard par phase et la matrice de transition."""
+        p = phases[~phases.isin(self.exclure)].dropna()
+        if len(p) < 40:
+            raise ValueError(f"Serie trop courte : {len(p)} trimestres.")
+        self.exog_noms_ = list(exog.columns) if exog is not None else []
+        self._fit_transitions(p)
+        self._fit_hazard(p, exog)
+        self.phase_courante_ = phases.dropna().iloc[-1]
+        self.anciennete_ = int(anciennete(phases.dropna()).iloc[-1])
+        self._ajuste = True
+        return self
+
+    def _fit_transitions(self, p: pd.Series):
+        ep = episodes(p)
+        suite = [(p[ep == e].iloc[0], p[ep == e + 1].iloc[0])
+                 for e in sorted(ep.unique())[:-1] if (ep == e + 1).any()]
+        if not suite:
+            raise ValueError("Aucune transition observee.")
+        dep, arr = sorted({a for a, _ in suite}), sorted({b for _, b in suite})
+        C = pd.DataFrame(0, index=dep, columns=arr, dtype=int)
+        for a, b in suite:
+            C.loc[a, b] += 1
+        P = C.astype(float).copy()
+        for d in dep:
+            k = C.loc[d].to_numpy(float)
+            n, K = k.sum(), len(arr)
+            P.loc[d] = (k + 1.0) / (n + K) if self.lissage else k / max(n, 1)
+            for j, dest in enumerate(arr):
+                lo, hi = stats.beta.ppf([0.05, 0.95], k[j] + 1, n - k[j] + K - 1)
+                self.intervalles_[(d, dest)] = (round(float(lo), 3), round(float(hi), 3))
+        self.comptes_, self.transitions_ = C, P.round(3)
+
+    def _fit_hazard(self, p: pd.Series, exog: pd.DataFrame | None):
+        import statsmodels.api as sm
+        d = self._panel_survie(p, exog)
+        for g in sorted(d.phase.unique()):
+            sub = d[d.phase == g]
+            sub = sub.dropna(subset=self.exog_noms_) if self.exog_noms_ else sub
+            ev = int(sub.sortie.sum())
+            if ev < self.min_evenements or len(sub) < 20:
+                warnings.warn(f"Phase '{g}' : {ev} sorties, phase ignoree.")
+                continue
+            X = np.column_stack([np.ones(len(sub)), np.log(sub.t.to_numpy())]
+                                + [sub[c].to_numpy() for c in self.exog_noms_])
+            try:
+                mod = sm.GLM(sub.sortie.to_numpy(), X,
+                             family=sm.families.Binomial(
+                                 sm.families.links.CLogLog())).fit()
+            except Exception as e:
+                warnings.warn(f"Phase '{g}' : estimation impossible ({e}).")
+                continue
+            self.hazard_[g] = dict(
+                params=np.asarray(mod.params), se=np.asarray(mod.bse),
+                pvalues=np.asarray(mod.pvalues),
+                noms=["const", "log_t"] + self.exog_noms_,
+                n=len(sub), evenements=ev,
+                duree_med=float(sub.groupby("episode").t.max().median()))
+
+    def _panel_survie(self, p: pd.Series, exog: pd.DataFrame | None) -> pd.DataFrame:
+        """Panel trimestre-risque. Le dernier episode est CENSURE a droite :
+        on sait qu'il a dure au moins t trimestres, pas quand il finira.
+        Le compter comme une sortie biaiserait les durees vers le bas."""
+        ep, anc = episodes(p), anciennete(p)
+        dernier = ep.max()
+        lignes = [dict(date=dt, episode=int(e), phase=ph, t=int(a),
+                       sortie=int(((ep == e).sum() == a) and e != dernier))
+                  for dt, e, a, ph in zip(p.index, ep, anc, p)]
+        d = pd.DataFrame(lignes).set_index("date")
+        if exog is not None:
+            for c in exog.columns:
+                d[c] = exog[c].reindex(d.index)
+        return d
+
+    # -- prevision ----------------------------------------------------------
+
+    def _check(self):
+        if not self._ajuste:
+            raise RuntimeError("Modele non ajuste : appelez .fit() d'abord.")
+
+    def hazard(self, phase: str, t: int, x: dict | None = None) -> float:
+        """Hasard discret h(t) = 1 - exp(-exp(eta)) : probabilite de sortir au
+        trimestre t sachant qu'on y est encore."""
+        self._check()
+        if phase not in self.hazard_:
+            raise KeyError(f"Phase '{phase}' non estimee. "
+                           f"Disponibles : {list(self.hazard_)}")
+        m = self.hazard_[phase]
+        eta = m["params"][0] + m["params"][1] * np.log(max(t, 1))
+        for k, nom in enumerate(m["noms"][2:], start=2):
             if x is None or nom not in x:
                 raise ValueError(f"Valeur manquante pour la covariable '{nom}'.")
-            eta += b[k] * x[nom]
-        hz = 1.0 - np.exp(-np.exp(np.clip(eta, -20, 20)))
-        sortie_j = surv * hz            # probabilite de sortir CE trimestre-la
-        surv *= (1.0 - hz)
-        for d in dests:
-            cumul[d] += sortie_j * float(P.loc[phase, d])
-        ligne = {"horizon": j, "anciennete": t, "hasard": round(hz, 3),
-                 f"reste_{phase}": round(surv, 3)}
-        ligne.update({d: round(cumul[d], 3) for d in dests})
-        ligne["phase_probable"] = (phase if surv >= max(cumul.values())
-                                   else max(cumul, key=cumul.get))
-        lignes.append(ligne)
-    out = pd.DataFrame(lignes)
-    if not absorbant:
-        warnings.warn("absorbant=False n'est pas implemente : le chainage des "
-                      "transitions supposerait un processus markovien, "
-                      "incompatible avec la dependance de duree estimee.")
-    return out
+            eta += m["params"][k] * x[nom]
+        return float(1.0 - np.exp(-np.exp(np.clip(eta, -20, 20))))
 
+    def predict(self, H: int = 6, phase: str | None = None,
+                t: int | None = None, x: dict | None = None) -> pd.DataFrame:
+        """Prevision a H trimestres.
 
-def resume(prev: pd.DataFrame, phase: str, matrice: dict,
-           horizon_cible: int | None = None) -> str:
-    """Formule en clair la prevision a un horizon donne."""
-    h = horizon_cible or len(prev)
-    r = prev[prev.horizon == h].iloc[0]
-    dests = [c for c in prev.columns
-             if c not in ("horizon", "anciennete", "hasard", "phase_probable")
-             and not c.startswith("reste_")]
-    reste = float(r[f"reste_{phase}"])
-    best = max(dests, key=lambda d: float(r[d]))
-    ic = matrice["intervalles"].get((phase, best), (np.nan, np.nan))
-    return (f"A {h} trimestre(s) : {100*(1-reste):.0f} % de chance d'avoir quitte "
-            f"'{phase}'. Destination la plus probable : '{best}' "
-            f"({100*float(r[best]):.0f} % en absolu ; part conditionnelle "
-            f"{100*matrice['probabilites'].loc[phase, best]:.0f} %, "
-            f"IC90 [{100*ic[0]:.0f} ; {100*ic[1]:.0f}] %).")
+        Returns
+        -------
+        DataFrame : une ligne par horizon.
+            hasard        taux de sortie du trimestre
+            p_change      P(avoir quitte la phase) — CUMULEE
+            p_change_cal  version recalibree, si .calibrate() a ete appele
+            <phase>       P(etre dans cette phase), par destination
+            lecture       traduction en clair du niveau de risque
 
+        Le modele est ABSORBANT : on ne chaine pas les transitions ulterieures.
+        Chainer supposerait un processus markovien, ce que la dependance de
+        duree contredit — le hasard depend de l'anciennete, pas de la seule phase.
+        """
+        self._check()
+        phase = phase or self.phase_courante_
+        t = t if t is not None else self.anciennete_
+        if phase not in self.transitions_.index:
+            raise KeyError(f"Phase '{phase}' absente de la matrice de transition.")
+        dests = list(self.transitions_.columns)
 
-# ---------------------------------------------------------------------------
-# Exploitation d'un indicateur avance
-# ---------------------------------------------------------------------------
+        lignes, surv, cumul = [], 1.0, {d: 0.0 for d in dests}
+        for j in range(1, H + 1):
+            hz = self.hazard(phase, t + j - 1, x)
+            sortie = surv * hz
+            surv *= (1.0 - hz)
+            for d in dests:
+                cumul[d] += sortie * float(self.transitions_.loc[phase, d])
+            pc = 1.0 - surv
+            ligne = {"horizon": j, "anciennete": t + j - 1,
+                     "hasard": round(hz, 3), "p_change": round(pc, 3)}
+            if self.calibration_ is not None:
+                ligne["p_change_cal"] = round(self._calibrer(pc), 3)
+            ligne[f"reste_{phase}"] = round(surv, 3)
+            ligne.update({d: round(cumul[d], 3) for d in dests})
+            ligne["lecture"] = self.lecture(
+                ligne.get("p_change_cal", pc))
+            lignes.append(ligne)
+        return pd.DataFrame(lignes)
 
-def signal_indicateur(serie: pd.Series, avance: int, coef: float,
-                      seuils: tuple = (0.25, 0.75)) -> dict:
-    """Traduit la derniere valeur d'un indicateur avance en signal exploitable.
+    @staticmethod
+    def lecture(p: float) -> str:
+        """Traduction du risque. Seuils issus de la calibration observee sur
+        backtest : la zone 0.30-0.45 correspondait a 68 % de changements reels,
+        au-dela de 0.45 a 94 %. Le seuil d'alerte est donc 0.30, pas 0.50."""
+        if p < 0.15:
+            return "stable"
+        if p < 0.30:
+            return "surveillance"
+        if p < 0.45:
+            return "changement probable"
+        return "changement quasi certain"
 
-    L'avance k signifie : la valeur observee en t informe sur la transition en
-    t+k. Le signal est donc CONNU d'avance sur k trimestres — c'est precisement
-    ce qui le rend utilisable.
+    def explain(self, H: int = 4, phase: str | None = None,
+                t: int | None = None, x: dict | None = None) -> str:
+        """Formule la prevision en clair, avec l'intervalle sur la destination."""
+        self._check()
+        phase = phase or self.phase_courante_
+        t = t if t is not None else self.anciennete_
+        pv = self.predict(H, phase, t, x)
+        r = pv.iloc[-1]
+        pc = float(r.get("p_change_cal", r["p_change"]))
+        dests = [c for c in self.transitions_.columns if c != phase]
+        best = max(dests, key=lambda d: float(r[d]))
+        cond = float(self.transitions_.loc[phase, best])
+        lo, hi = self.intervalles_.get((phase, best), (np.nan, np.nan))
+        return (f"{phase} depuis {t} trimestres. A {H} trimestre(s) : "
+                f"{100*pc:.0f} % de probabilite d'en etre sorti ({self.lecture(pc)}). "
+                f"Destination la plus probable : {best} — {100*cond:.0f} % "
+                f"des sorties historiques, IC90 [{100*lo:.0f} ; {100*hi:.0f}] %.")
 
-    `coef` est le coefficient estime sur la transition. Son SIGNE fixe la
-    lecture : negatif = une valeur elevee eloigne la transition.
-    """
-    s = serie.dropna()
-    if len(s) < 20:
-        raise ValueError(f"Serie trop courte ({len(s)} obs).")
-    val = float(s.iloc[-1])
-    pct = float((s < val).mean())
-    lo, hi = seuils
-    if coef < 0:
-        etat = ("signal de transition" if pct <= lo
-                else "signal de prolongation" if pct >= hi else "neutre")
-    else:
-        etat = ("signal de prolongation" if pct <= lo
-                else "signal de transition" if pct >= hi else "neutre")
-    return dict(date=str(s.index[-1]), valeur=round(val, 2),
-                percentile=round(100 * pct, 1), avance=avance,
-                informe_sur=str(s.index[-1] + avance), signal=etat,
-                sens=("valeur elevee = transition eloignee" if coef < 0
-                      else "valeur elevee = transition proche"))
+    # -- validation et recalibration ---------------------------------------
+
+    def backtest(self, phases: pd.Series, debut: str, H: int = 4,
+                 exog: pd.DataFrame | None = None) -> pd.DataFrame:
+        """Backtest RECURSIF : a chaque date, le modele est reestime sur le
+        passe seul. Sans cette reestimation, le test serait sans valeur.
+
+        Reserve : les etiquettes de phase proviennent d'une datation etablie en
+        plein echantillon. Un test veritablement en temps reel exigerait de
+        redater recursivement, ce qui degraderait les resultats.
+        """
+        p = phases.dropna()
+        d0 = pd.Period(debut, freq=p.index.freqstr)
+        lignes = []
+        for i, t in enumerate(p.index):
+            if t < d0 or i < 40:
+                continue
+            passe = p.iloc[:i + 1]
+            try:
+                m = CycleModel(self.exclure, self.min_evenements, self.lissage)
+                m.fit(passe, exog.reindex(passe.index) if exog is not None else None)
+            except Exception:
+                continue
+            cur, anc = m.phase_courante_, m.anciennete_
+            if cur not in m.hazard_ or cur not in m.transitions_.index:
+                continue
+            xx = ({k: float(exog[k].reindex([t]).iloc[0]) for k in self.exog_noms_}
+                  if exog is not None else None)
+            if xx is not None and any(pd.isna(v) for v in xx.values()):
+                continue
+            try:
+                pv = m.predict(H, cur, anc, xx)
+            except Exception:
+                continue
+            for h in range(1, H + 1):
+                cible = t + h
+                if cible not in p.index:
+                    continue
+                lignes.append(dict(
+                    date=str(t), phase_t=cur, anciennete=anc, h=h, cible=str(cible),
+                    p_change=float(pv.iloc[h - 1]["p_change"]),
+                    reelle=p.loc[cible], change_reel=bool(p.loc[cible] != cur)))
+        return pd.DataFrame(lignes)
+
+    def calibrate(self, backtest: pd.DataFrame, n_bins: int = 4):
+        """Corrige l'ecrasement d'echelle constate sur backtest.
+
+        Le modele ne connait que la duree : il ne distingue pas un episode qui
+        va degenerer d'un autre qui va se resorber, donc il moyenne et
+        sous-estime systematiquement le risque (de ~19 points sur le backtest
+        realise). On apprend la correspondance annonce -> observe, par
+        regression isotone (monotone, donc l'ordre est preserve).
+        """
+        b = backtest.dropna(subset=["p_change", "change_reel"])
+        if len(b) < 30:
+            raise ValueError(f"Backtest trop court : {len(b)} lignes.")
+        b = b.sort_values("p_change")
+        try:
+            from sklearn.isotonic import IsotonicRegression
+            iso = IsotonicRegression(y_min=0, y_max=1, out_of_bounds="clip")
+            iso.fit(b.p_change.to_numpy(), b.change_reel.astype(float).to_numpy())
+            grille = np.linspace(0, 1, 101)
+            self.calibration_ = pd.DataFrame(
+                {"annonce": grille, "corrige": iso.predict(grille)})
+        except ImportError:
+            # repli : table par tranches, sans dependance a scikit-learn
+            b["bin"] = pd.qcut(b.p_change, min(n_bins, b.p_change.nunique()),
+                               duplicates="drop")
+            t = b.groupby("bin").agg(annonce=("p_change", "mean"),
+                                     corrige=("change_reel", "mean")).reset_index(drop=True)
+            self.calibration_ = t.sort_values("annonce")
+        return self
+
+    def _calibrer(self, p: float) -> float:
+        c = self.calibration_
+        return float(np.interp(p, c["annonce"], c["corrige"]))
+
+    # -- restitution --------------------------------------------------------
+
+    def summary(self) -> str:
+        self._check()
+        L = ["=" * 68, "MODELE DE CYCLE", "=" * 68,
+             f"Etat courant : {self.phase_courante_} depuis {self.anciennete_} trimestres",
+             f"Covariables  : {self.exog_noms_ or 'aucune'}",
+             f"Calibration  : {'appliquee' if self.calibration_ is not None else 'non appliquee'}",
+             "", "-- Hasard de sortie (cloglog) --",
+             f"{'phase':<16}{'n':>5}{'sorties':>9}{'duree med':>11}   {'log_t (dependance de duree)'}"]
+        for g, m in self.hazard_.items():
+            L.append(f"{g:<16}{m['n']:>5}{m['evenements']:>9}{m['duree_med']:>11.1f}   "
+                     f"{m['params'][1]:+.3f} (p={m['pvalues'][1]:.3f})")
+        L += ["", "-- Matrice de transition (probabilites) --",
+              self.transitions_.to_string()]
+        return "\n".join(L)
+
+    def __repr__(self):
+        if not self._ajuste:
+            return "<CycleModel non ajuste>"
+        return (f"<CycleModel {self.phase_courante_} t={self.anciennete_} "
+                f"| {len(self.hazard_)} phases | "
+                f"exog={self.exog_noms_ or 'aucune'}>")
