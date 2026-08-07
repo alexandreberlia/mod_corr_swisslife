@@ -76,14 +76,32 @@ class CycleModel:
         Posterieur de Laplace sur la matrice de transition. Une destination
         jamais observee recoit alors une probabilite faible mais NON NULLE :
         l'absence sur onze episodes ne prouve pas l'impossibilite.
+    firth : bool
+        Vraisemblance penalisee de Firth pour les hasards par destination.
+        Indispensable avec 2 a 6 evenements par branche : le maximum de
+        vraisemblance ordinaire y diverge par separation quasi complete. La
+        penalite de Jeffreys garantit un estimateur fini et retire le biais
+        d'ordre 1/n. Sur grand echantillon, elle devient negligeable et l'on
+        retrouve le MV ordinaire.
+    risques_concurrents : bool
+        Estime un hasard DISTINCT par destination, au lieu d'un hasard unique
+        « sortir ». Necessaire des lors qu'une covariable agit en sens opposes
+        selon la destination : un ISM eleve eloigne le Decrochage et rapproche
+        l'Explosion, si bien qu'un hasard agrege les moyenne a zero. Le cout est
+        le comptage — 5 et 3 evenements par branche en Ralentissement — d'ou
+        l'affichage systematique des effectifs a cote des coefficients.
     """
 
     def __init__(self, exclure: tuple = ("Choc Covid",),
-                 min_evenements: int = 3, lissage: bool = True):
+                 min_evenements: int = 3, lissage: bool = True,
+                 risques_concurrents: bool = False, firth: bool = True):
         self.exclure = exclure
         self.min_evenements = min_evenements
         self.lissage = lissage
+        self.risques_concurrents = risques_concurrents
+        self.firth = firth
         self.hazard_: dict = {}
+        self.hazard_dest_: dict = {}
         self.transitions_: pd.DataFrame | None = None
         self.comptes_: pd.DataFrame | None = None
         self.intervalles_: dict = {}
@@ -91,6 +109,7 @@ class CycleModel:
         self.phase_courante_: str | None = None
         self.anciennete_: int | None = None
         self.calibration_: pd.DataFrame | None = None
+        self.unite_ = "periodes"
         self._ajuste = False
 
     # -- estimation ---------------------------------------------------------
@@ -103,6 +122,10 @@ class CycleModel:
         self.exog_noms_ = list(exog.columns) if exog is not None else []
         self._fit_transitions(p)
         self._fit_hazard(p, exog)
+        if self.risques_concurrents:
+            self._fit_hazard_dest(p, exog)
+        f = str(getattr(phases.index, "freqstr", "Q"))[:1]
+        self.unite_ = {"M": "mois", "Q": "trimestres", "A": "annees"}.get(f, "periodes")
         self.phase_courante_ = phases.dropna().iloc[-1]
         self.anciennete_ = int(anciennete(phases.dropna()).iloc[-1])
         self._ajuste = True
@@ -154,15 +177,71 @@ class CycleModel:
                 n=len(sub), evenements=ev,
                 duree_med=float(sub.groupby("episode").t.max().median()))
 
-    def _panel_survie(self, p: pd.Series, exog: pd.DataFrame | None) -> pd.DataFrame:
+    def _fit_hazard_dest(self, p: pd.Series, exog: pd.DataFrame | None):
+        """Un hasard par couple (phase de depart, destination)."""
+        import statsmodels.api as sm
+        d = self._panel_survie(p, exog, avec_dest=True)
+        for g in sorted(d.phase.unique()):
+            sub = d[d.phase == g]
+            sub = sub.dropna(subset=self.exog_noms_) if self.exog_noms_ else sub
+            if len(sub) < 20:
+                continue
+            X = np.column_stack([np.ones(len(sub)), np.log(sub.t.to_numpy())]
+                                + [sub[c].to_numpy() for c in self.exog_noms_])
+            for dest in sorted(sub.dest.dropna().unique()):
+                y = ((sub.sortie == 1) & (sub.dest == dest)).astype(int).to_numpy()
+                ev = int(y.sum())
+                if ev < 2:
+                    continue
+                if self.firth:
+                    from firth import fit_firth
+                    try:
+                        f = fit_firth(X, y.astype(float))
+                    except Exception:
+                        continue
+                    par, bse = f["params"], f["se"]
+                    pv, pv_lr, sep = f["pvalues"], f["pvalues_lr"], f["separation"]
+                else:
+                    try:
+                        mod = sm.GLM(y, X, family=sm.families.Binomial(
+                            sm.families.links.CLogLog())).fit(maxiter=200)
+                    except Exception:
+                        continue
+                    par, bse = np.asarray(mod.params), np.asarray(mod.bse)
+                    pv = np.asarray(mod.pvalues)
+                    pv_lr, sep = np.full(len(par), np.nan), False
+                # Separation quasi complete : avec 2-3 evenements, la
+                # vraisemblance n'a pas de maximum interieur et les
+                # coefficients divergent. On les marque plutot que de les
+                # publier comme des estimations.
+                degen = bool(np.max(np.abs(par)) > 10 or np.max(bse) > 50
+                             or not np.all(np.isfinite(bse)))
+                self.hazard_dest_[(g, dest)] = dict(
+                    params=par, se=bse, pvalues=pv, pvalues_lr=pv_lr,
+                    separation=sep, methode="Firth" if self.firth else "MV",
+                    noms=["const", "log_t"] + self.exog_noms_,
+                    n=len(sub), evenements=ev,
+                    fiable=(ev >= 8 and not degen), degenere=degen)
+
+    def _panel_survie(self, p: pd.Series, exog: pd.DataFrame | None,
+                      avec_dest: bool = False) -> pd.DataFrame:
         """Panel trimestre-risque. Le dernier episode est CENSURE a droite :
         on sait qu'il a dure au moins t trimestres, pas quand il finira.
         Le compter comme une sortie biaiserait les durees vers le bas."""
         ep, anc = episodes(p), anciennete(p)
         dernier = ep.max()
-        lignes = [dict(date=dt, episode=int(e), phase=ph, t=int(a),
-                       sortie=int(((ep == e).sum() == a) and e != dernier))
-                  for dt, e, a, ph in zip(p.index, ep, anc, p)]
+        dest_de = {}
+        if avec_dest:
+            for e in sorted(ep.unique())[:-1]:
+                if (ep == e + 1).any():
+                    dest_de[e] = p[ep == e + 1].iloc[0]
+        lignes = []
+        for dt, e, a, ph in zip(p.index, ep, anc, p):
+            fin = ((ep == e).sum() == a) and e != dernier
+            r = dict(date=dt, episode=int(e), phase=ph, t=int(a), sortie=int(fin))
+            if avec_dest:
+                r["dest"] = dest_de.get(int(e)) if fin else None
+            lignes.append(r)
         d = pd.DataFrame(lignes).set_index("date")
         if exog is not None:
             for c in exog.columns:
@@ -259,7 +338,7 @@ class CycleModel:
         best = max(dests, key=lambda d: float(r[d]))
         cond = float(self.transitions_.loc[phase, best])
         lo, hi = self.intervalles_.get((phase, best), (np.nan, np.nan))
-        return (f"{phase} depuis {t} trimestres. A {H} trimestre(s) : "
+        return (f"{phase} depuis {t} {self.unite_}. A {H} {self.unite_[:-1] if self.unite_.endswith('s') else self.unite_}(s) : "
                 f"{100*pc:.0f} % de probabilite d'en etre sorti ({self.lecture(pc)}). "
                 f"Destination la plus probable : {best} — {100*cond:.0f} % "
                 f"des sorties historiques, IC90 [{100*lo:.0f} ; {100*hi:.0f}] %.")
@@ -346,14 +425,32 @@ class CycleModel:
     def summary(self) -> str:
         self._check()
         L = ["=" * 68, "MODELE DE CYCLE", "=" * 68,
-             f"Etat courant : {self.phase_courante_} depuis {self.anciennete_} trimestres",
+             f"Etat courant : {self.phase_courante_} depuis {self.anciennete_} {self.unite_}",
              f"Covariables  : {self.exog_noms_ or 'aucune'}",
              f"Calibration  : {'appliquee' if self.calibration_ is not None else 'non appliquee'}",
-             "", "-- Hasard de sortie (cloglog) --",
+             "", f"-- Hasard de sortie (cloglog), duree en {self.unite_} --",
              f"{'phase':<16}{'n':>5}{'sorties':>9}{'duree med':>11}   {'log_t (dependance de duree)'}"]
         for g, m in self.hazard_.items():
             L.append(f"{g:<16}{m['n']:>5}{m['evenements']:>9}{m['duree_med']:>11.1f}   "
                      f"{m['params'][1]:+.3f} (p={m['pvalues'][1]:.3f})")
+        if self.hazard_dest_:
+            meth = next(iter(self.hazard_dest_.values())).get("methode", "MV")
+            L += ["", f"-- Hasards par destination ({meth}) --",
+                  f"{'depart -> destination':<34}{'evts':>5}{'log_t':>9}"
+                  + (f"{self.exog_noms_[0]:>11}{'p(RV)':>8}" if self.exog_noms_ else "")
+                  + "   sep."]
+            for (g, dst), m in sorted(self.hazard_dest_.items()):
+                if m.get("degenere") and not self.firth:
+                    L.append(f"{g + ' -> ' + dst:<34}{m['evenements']:>5}"
+                             f"   DIVERGENT — activez firth=True")
+                    continue
+                ligne = f"{g + ' -> ' + dst:<34}{m['evenements']:>5}{m['params'][1]:>+9.3f}"
+                if self.exog_noms_:
+                    p = m.get("pvalues_lr", [np.nan] * 3)[2]
+                    ligne += f"{m['params'][2]:>+11.4f}"
+                    ligne += f"{p:>8.3f}" if np.isfinite(p) else f"{'-':>8}"
+                ligne += "    oui" if m.get("separation") else "    non"
+                L.append(ligne)
         L += ["", "-- Matrice de transition (probabilites) --",
               self.transitions_.to_string()]
         return "\n".join(L)
