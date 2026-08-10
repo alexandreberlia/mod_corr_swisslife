@@ -124,6 +124,21 @@ class CycleModel:
         Posterieur de Laplace sur la matrice de transition. Une destination
         jamais observee recoit alors une probabilite faible mais NON NULLE :
         l'absence sur onze episodes ne prouve pas l'impossibilite.
+    mutualise : bool
+        Estime UNE equation sur toutes les phases, avec une constante et une
+        pente de duree propres a chaque phase, mais des coefficients de
+        covariables COMMUNS :
+
+            cloglog h(t) = SUM_p D_p (alpha_p + beta_p log t) + gamma' x
+
+        Interet decisif : les 40 evenements de l'echantillon financent alors un
+        seul jeu de gamma, au lieu de 6 a 8 evenements par phase. La regle
+        usuelle de 10 evenements par parametre autorise ainsi 3 a 4 covariables,
+        contre une seule en estimation separee.
+
+        Le prix : on suppose l'effet des covariables IDENTIQUE d'une phase a
+        l'autre. Hypothese forte et testable — .test_homogeneite() donne un
+        Wald d'egalite des gamma entre phases.
     firth : bool
         Vraisemblance penalisee de Firth pour les hasards par destination.
         Indispensable avec 2 a 6 evenements par branche : le maximum de
@@ -142,12 +157,15 @@ class CycleModel:
 
     def __init__(self, exclure: tuple = ("Choc Covid",),
                  min_evenements: int = 3, lissage: bool = True,
-                 risques_concurrents: bool = False, firth: bool = True):
+                 risques_concurrents: bool = False, firth: bool = True,
+                 mutualise: bool = False):
         self.exclure = exclure
         self.min_evenements = min_evenements
         self.lissage = lissage
         self.risques_concurrents = risques_concurrents
         self.firth = firth
+        self.mutualise = mutualise
+        self.pool_: dict | None = None
         self.hazard_: dict = {}
         self.hazard_dest_: dict = {}
         self.transitions_: pd.DataFrame | None = None
@@ -172,6 +190,8 @@ class CycleModel:
             raise ValueError(f"Serie trop courte : {len(p)} trimestres.")
         self.exog_noms_ = list(exog.columns) if exog is not None else []
         self._fit_transitions(p)
+        if self.mutualise and self.exog_noms_:
+            self._fit_pool(p, exog)
         self._fit_hazard(p, exog)
         if self.risques_concurrents:
             self._fit_hazard_dest(p, exog)
@@ -227,6 +247,66 @@ class CycleModel:
                 noms=["const", "log_t"] + self.exog_noms_,
                 n=len(sub), evenements=ev,
                 duree_med=float(sub.groupby("episode").t.max().median()))
+
+    def _fit_pool(self, p: pd.Series, exog: pd.DataFrame):
+        """Equation unique : effets de duree par phase, covariables communes."""
+        import statsmodels.api as sm
+        d = self._panel_survie(p, exog).dropna(subset=self.exog_noms_)
+        phases = sorted(d.phase.unique())
+        blocs, noms = [], []
+        for ph in phases:
+            D = (d.phase == ph).astype(float).to_numpy()
+            blocs += [D, D * np.log(d.t.to_numpy())]
+            noms += [f"const[{ph}]", f"log_t[{ph}]"]
+        for c in self.exog_noms_:
+            blocs.append(d[c].to_numpy())
+            noms.append(c)
+        X = np.column_stack(blocs)
+        try:
+            mod = sm.GLM(d.sortie.to_numpy(), X, family=sm.families.Binomial(
+                sm.families.links.CLogLog())).fit(maxiter=300)
+        except Exception as e:
+            warnings.warn(f"Estimation mutualisee impossible : {e}")
+            return
+        self.pool_ = dict(params=np.asarray(mod.params), se=np.asarray(mod.bse),
+                          pvalues=np.asarray(mod.pvalues), noms=noms,
+                          phases=phases, n=len(d),
+                          evenements=int(d.sortie.sum()),
+                          idx_gamma=[noms.index(c) for c in self.exog_noms_],
+                          _X=X, _y=d.sortie.to_numpy(), _d=d)
+
+    def test_homogeneite(self) -> pd.DataFrame:
+        """Teste si l'effet d'une covariable est le meme dans toutes les phases.
+
+        Compare le modele mutualise (gamma commun) au modele autorisant un gamma
+        par phase, par rapport de vraisemblance. Un rejet signifie que
+        mutualiser masque une heterogeneite reelle — et qu'il faut alors
+        revenir a l'estimation par phase, ou accepter un effet moyen.
+        """
+        import statsmodels.api as sm
+        from scipy import stats as st
+        if self.pool_ is None:
+            raise RuntimeError("Disponible seulement avec mutualise=True.")
+        d, base = self.pool_["_d"], self.pool_["_X"]
+        mod0 = sm.GLM(self.pool_["_y"], base, family=sm.families.Binomial(
+            sm.families.links.CLogLog())).fit(maxiter=300)
+        lignes = []
+        for c in self.exog_noms_:
+            j = self.pool_["noms"].index(c)
+            X1 = np.delete(base, j, axis=1)
+            for ph in self.pool_["phases"]:
+                X1 = np.column_stack([X1, (d.phase == ph).to_numpy(float)
+                                      * d[c].to_numpy()])
+            try:
+                mod1 = sm.GLM(self.pool_["_y"], X1, family=sm.families.Binomial(
+                    sm.families.links.CLogLog())).fit(maxiter=300)
+                lr = 2 * (mod1.llf - mod0.llf)
+                q = len(self.pool_["phases"]) - 1
+                lignes.append(dict(covariable=c, LR=round(float(lr), 2), ddl=q,
+                                   p=round(float(1 - st.chi2.cdf(max(lr, 0), q)), 4)))
+            except Exception:
+                lignes.append(dict(covariable=c, LR=np.nan, ddl=np.nan, p=np.nan))
+        return pd.DataFrame(lignes)
 
     def _fit_hazard_dest(self, p: pd.Series, exog: pd.DataFrame | None):
         """Un hasard par couple (phase de depart, destination)."""
@@ -505,6 +585,14 @@ class CycleModel:
                     ligne += f"{p:>8.3f}" if np.isfinite(p) else f"{'-':>8}"
                 ligne += "    oui" if m.get("separation") else "    non"
                 L.append(ligne)
+        if self.pool_ is not None:
+            pl = self.pool_
+            L += ["", f"-- Estimation mutualisee ({pl['evenements']} evenements, "
+                      f"{pl['n']} lignes) --",
+                  f"{'covariable':<22}{'coef':>10}{'se':>9}{'p':>8}"]
+            for j, c in zip(pl["idx_gamma"], self.exog_noms_):
+                L.append(f"{c:<22}{pl['params'][j]:>+10.4f}{pl['se'][j]:>9.4f}"
+                         f"{pl['pvalues'][j]:>8.3f}")
         L += ["", "-- Matrice de transition (probabilites) --",
               self.transitions_.to_string()]
         return "\n".join(L)
