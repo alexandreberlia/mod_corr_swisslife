@@ -63,6 +63,54 @@ def anciennete(phases: pd.Series) -> pd.Series:
     return ep.groupby(ep).cumcount() + 1
 
 
+
+def _assurer_period_index(s, nom="phases"):
+    """Convertit l'index en PeriodIndex, ou explique precisement quoi faire.
+
+    Un read_csv laisse un Index de chaines, sans attribut freqstr ; un
+    DatetimeIndex en a un, mais il vaut None si la frequence n'est pas posee.
+    Les deux cassent toute comparaison de dates en aval, d'ou cette conversion
+    systematique a l'entree plutot qu'un plantage sur un attribut manquant.
+    """
+    s = s.copy()
+    idx = s.index
+    if isinstance(idx, pd.PeriodIndex):
+        return s
+    if isinstance(idx, pd.DatetimeIndex):
+        f = idx.freqstr or pd.infer_freq(idx)
+        # infer_freq renvoie des alias de DateOffset ('MS', 'QS-OCT', 'YE-DEC')
+        # que to_period refuse : on ne garde que la lettre de base.
+        if f is not None:
+            f = {"M": "M", "Q": "Q", "A": "A", "Y": "A", "W": "W", "D": "D"}.get(
+                f.split("-")[0].rstrip("SE") or f[0], f.split("-")[0])
+        if f is None:
+            raise ValueError(
+                f"L'index de `{nom}` est un DatetimeIndex sans frequence "
+                "identifiable. Convertissez-le explicitement :\n"
+                f"    {nom}.index = pd.PeriodIndex({nom}.index, freq='M')  # ou 'Q'")
+        return s.set_axis(idx.to_period(f))
+    try:
+        conv = pd.PeriodIndex(idx)
+        return s.set_axis(conv)
+    except Exception:
+        pass
+    # Chaines de dates ('1949-10', '2024Q2') : on passe par to_datetime puis on
+    # infere la frequence sur l'ecart median entre observations. Plus robuste
+    # que pd.infer_freq, qui echoue des qu'une date manque.
+    try:
+        dt = pd.to_datetime(pd.Index(idx).astype(str), errors="raise")
+        jours = pd.Series(dt).diff().dt.days.median()
+        f = "M" if jours < 45 else ("Q" if jours < 120 else "A")
+        return s.set_axis(dt.to_period(f))
+    except Exception:
+        raise TypeError(
+            f"L'index de `{nom}` est un {type(idx).__name__}, pas un "
+            "PeriodIndex. Apres un read_csv, l'index reste une simple chaine ; "
+            "convertissez-le :\n"
+            f"    {nom}.index = pd.PeriodIndex({nom}.index, freq='M')  # ou 'Q'")
+    return s.set_axis(conv)
+
+
 class CycleModel:
     """Modele de duree + matrice de transition pour un decoupage en phases.
 
@@ -116,6 +164,9 @@ class CycleModel:
 
     def fit(self, phases: pd.Series, exog: pd.DataFrame | None = None):
         """Estime le hasard par phase et la matrice de transition."""
+        phases = _assurer_period_index(phases, "phases")
+        if exog is not None:
+            exog = _assurer_period_index(exog, "exog")
         p = phases[~phases.isin(self.exclure)].dropna()
         if len(p) < 40:
             raise ValueError(f"Serie trop courte : {len(p)} trimestres.")
@@ -354,8 +405,11 @@ class CycleModel:
         plein echantillon. Un test veritablement en temps reel exigerait de
         redater recursivement, ce qui degraderait les resultats.
         """
+        phases = _assurer_period_index(phases, "phases")
+        if exog is not None:
+            exog = _assurer_period_index(exog, "exog")
         p = phases.dropna()
-        d0 = pd.Period(debut, freq=p.index.freqstr)
+        d0 = debut if isinstance(debut, pd.Period) else pd.Period(debut, freq=p.index.freqstr)
         lignes = []
         for i, t in enumerate(p.index):
             if t < d0 or i < 40:
