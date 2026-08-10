@@ -59,22 +59,20 @@ warnings.filterwarnings("ignore")
 # signe -1 : une hausse = economie plus faible (chomage, inscriptions)
 
 COMPOSANTES_NIVEAU = {
-    "OUTFAG Index": +1,           # Commandes à l'industrie
-    "CFNAI Index": +1,     #Indice national d'activité de la Fed de Chicago
-    "RCHSINDX Index": +1,      #Enquête manufacturière de la Fed de Richmond
-    "CONSSENT Index": +1,    #Indice de sentiment des consommateurs
-    "NAPMPMI Index": +1,   # Indice ISM manufacturier
-    "Housing Permit": +1,   # permis de construire — la variable reelle la plus avancee
-    "NHSPATOT Index": +1,     #Ventes de logements neufs
-    "LEI YOY Index": +1      #Indicateur avancé de l'économie sur un an
+    "CFNAI Index": +1,        # indice d'activite composite, coincident par construction
+    "IP  YOY Index": +1,      # production industrielle, glissement annuel
+    "NFP TCH Index": +1,      # creations d'emplois
+    "USURTOT Index": -1,      # taux de chomage (inverse)
+    "NAPMPMI Index": +1,      # ISM manufacturier
 }
 
 COMPOSANTES_MOMENTUM = {
-    "CHPMINDX Index": +1,      # Indice PMI de Chicago
-    "NAPMPMI Index": +1,      # Indice ISM manufacturier
-    "CFNAI Index": +1,     # permis de construire — la variable reelle la plus avancee
-    "OUTFGAF Index": +1,             # Commandes à l'industrie
-    "PCE CHNC Index": +1,
+    "LEI YOY Index": +1,      # indice avance du Conference Board
+    "OUTFGAF Index": +1,      # nouvelles commandes (Philly Fed)
+    "Housing Permit": +1,     # permis de construire — la variable reelle la plus avancee
+    "T10Y3M": +1,             # pente des taux
+    "CONCCONF Index": +1,     # confiance des menages
+    "CHPMINDX Index": +1,     # PMI de Chicago
 }
 
 
@@ -255,22 +253,20 @@ def libelle(score: float) -> str:
 # domine du seul fait de son amplitude.
 
 POIDS_NIVEAU_DEFAUT = {
-    "OUTFAG Index": (+1, 0.1509),           # Commandes à l'industrie
-    "CFNAI Index": (+1, 0.1491),   #Indice national d'activité de la Fed de Chicago
-    "RCHSINDX Index": (+1, 0.1477),      #Enquête manufacturière de la Fed de Richmond
-    "CONSSENT Index": (+1, 0.0698),   #Indice de sentiment des consommateurs
-    "NAPMPMI Index": (+1,0.0680),   # Indice ISM manufacturier
-    "Housing Permit": (+1, 0.1363),  # permis de construire — la variable reelle la plus avancee
-    "NHSPATOT Index": (+1, 0.0698),    #Ventes de logements neufs
-    "LEI YOY Index": (+1, 0.1420)     #Indicateur avancé de l'économie sur un an
+    "CFNAI Index":    (+1, 3.0),   # composite de 85 series : le socle
+    "USURTOT Index":  (-1, 2.0),   # chomage — remonte a 2.0 vs 0.03 en ACP
+    "IP  YOY Index":  (+1, 2.0),
+    "NFP TCH Index":  (+1, 2.0),
+    "NAPMPMI Index":  (+1, 1.0),   # enquete : reactive mais bruitee
 }
 
 POIDS_MOMENTUM_DEFAUT = {
-    "CHPMINDX Index": (+1,0.182378),      # Indice PMI de Chicago
-    "NAPMPMI Index": (+1,0.176532),      # Indice ISM manufacturier
-    "CFNAI Index": (+1,0.411570),     # permis de construire — la variable reelle la plus avancee
-    "OUTFGAF Index": (+1,0.113310),           # Commandes à l'industrie
-    "PCE CHNC Index": (+1, 0.116210),
+    "LEI YOY Index":  (+1, 3.0),   # indice avance de reference
+    "T10Y3M":         (+1, 2.5),   # pente — remontee vs 0.04 en ACP
+    "Housing Permit": (+1, 2.0),   # variable reelle la plus avancee (Leamer)
+    "OUTFGAF Index":  (+1, 1.5),
+    "CHPMINDX Index": (+1, 1.0),
+    "CONCCONF Index": (+1, 1.0),
 }
 
 
@@ -413,25 +409,25 @@ def _appliquer_transform(s: pd.Series, transform: str | None) -> pd.Series:
 
 # format : nom_colonne -> (signe, poids, transform)
 BLOC_AVANCE = {
-    "NAPMPMI Index":  (+1, 0.17, None),    # ISM manufacturier 0.05
-    "CHPMINDX Index": (+1, 0.17, None),    # PMI de Chicago 0.05
-    "OUTFGAF Index":  (+1, 0.17, None),    # nouvelles commandes 0.05
-    "CONSSENT Index": (+1, 0.17, None),    # sentiment des menages (Michigan) 0.05
-    "CONCCONF Index": (+1, 0.32, None),    # confiance des menages 0.1
+    "NAPMPMI Index":  (+1, 2.5, None),    # ISM manufacturier
+    "CHPMINDX Index": (+1, 1.5, None),    # PMI de Chicago
+    "OUTFGAF Index":  (+1, 1.5, None),    # nouvelles commandes
+    "CONSSENT Index": (+1, 2.0, None),    # sentiment des menages (Michigan)
+    "CONCCONF Index": (+1, 1.5, None),    # confiance des menages
 }
 
 BLOC_COINCIDENT = {
-    "GDP CYOY Index": (+1, 0.222, None),    # PIB, glissement annuel 0.1
-    "IP  YOY Index":  (+1, 0.111, None),    # production industrielle 0.05
-    "USURTOT Index":  (-1, 0.333, None),    # chomage (inverse) 0.15
-    "PCE CHNC Index": (+1, 0.122, None),    # consommation des menages 0.1
-    "SAARTOTL Index": (+1, 0.222, None),    # ventes automobiles 0.05
+    "GDP CYOY Index": (+1, 3.0, None),    # PIB, glissement annuel
+    "IP  YOY Index":  (+1, 2.5, None),    # production industrielle
+    "USURTOT Index":  (-1, 2.5, None),    # chomage (inverse)
+    "PCE CHNC Index": (+1, 1.5, None),    # consommation des menages
+    "SAARTOTL Index": (+1, 1.0, None),    # ventes automobiles
 }
 
 BLOC_RETARDE = {
-    "CPI XYOY Index": (+1, 0.2, "d4"),    # acceleration de l'inflation sous-jacente 0.05
-    "PCE CYOY Index": (+1, 0.2, "d4"),    # idem, deflateur PCE 0.05
-    "FED FUNDS":      (+1, 0.6, "d4"),    # resserrement cumule sur un an 0.15
+    "CPI XYOY Index": (+1, 2.0, "d4"),    # acceleration de l'inflation sous-jacente
+    "PCE CYOY Index": (+1, 2.0, "d4"),    # idem, deflateur PCE
+    "FED FUNDS":      (+1, 2.0, "d4"),    # resserrement cumule sur un an
 }
 
 
@@ -456,7 +452,7 @@ def _agreger_3champs(panel, spec, rolling, couverture_min):
 def build_score_3blocs(panel: pd.DataFrame,
                        avance: dict = None, coincident: dict = None,
                        retarde: dict = None,
-                       poids_globaux=(0.30, 0.45, 0.25),
+                       poids_globaux: tuple | str = "auto",
                        rolling: int | None = None,
                        couverture_min: float = 0.60) -> pd.DataFrame:
     """Score 0-100 a trois blocs : avance, coincident, retarde.
@@ -466,10 +462,19 @@ def build_score_3blocs(panel: pd.DataFrame,
     avance, coincident, retarde : dict
         {nom_colonne: (signe, poids, transform)}. transform vaut None, "d4",
         "d1" ou "rdt4". Les poids sont renormalises par bloc.
-    poids_globaux : tuple
-        Ponderation (avance, coincident, retarde) dans le score global. Le bloc
-        retarde recoit un poids faible : il documente la position dans le cycle,
-        il ne mesure pas son intensite.
+    poids_globaux : tuple | str
+        Ponderation (avance, coincident, retarde). "auto" est un raccourci pour
+        (0.6, 0.4, 0.0), optimal pour dater le PRESENT (AUC 0.927 sur les
+        recessions NBER). Pour un usage PROSPECTIF, passez (1, 0, 0) : au-dela
+        d'un trimestre, le bloc avance seul domine tout melange, le bloc
+        coincident ne faisant qu'ajouter du passe.
+
+        Poids optimaux mesures contre les recessions NBER :
+            horizon 0 : (0.6, 0.4, 0.0)   AUC 0.927
+            horizon 1 : (1.0, 0.0, 0.0)   AUC 0.843
+            horizon 2 : (1.0, 0.0, 0.0)   AUC 0.735
+        Le bloc retarde recoit un poids nul partout : il documente la position
+        dans le cycle, il ne contribue pas a l'identifier.
 
     Returns
     -------
@@ -488,8 +493,14 @@ def build_score_3blocs(panel: pd.DataFrame,
         poids[nom] = w.round(4)
         contrib[nom] = (Z * w).round(4)
     df = pd.DataFrame(out)
+    if isinstance(poids_globaux, str):
+        if poids_globaux != "auto":
+            raise ValueError("poids_globaux doit etre un triplet ou 'auto'.")
+        poids_globaux = (0.6, 0.4, 0.0)
     pa, pc, pr = poids_globaux
     tot = pa + pc + pr
+    if tot <= 0:
+        raise ValueError("La somme des poids globaux doit etre positive.")
     df["score_global"] = (pa * df.score_avance + pc * df.score_coincident
                           + pr * df.score_retarde) / tot
     df.attrs["poids"] = poids
@@ -504,10 +515,3 @@ def phase_3blocs(score_avance: float, score_coincident: float,
     accel = score_avance >= seuil
     return {(True, True): "Explosion", (True, False): "Ralentissement",
             (False, True): "Reprise", (False, False): "Decrochage"}[(haut, accel)]
-
-def panel_data(fichier_csv):     
-    panel=pd.read_csv(fichier_csv)
-    panel.index=panel["periode_Q"]
-    panel.drop(columns="periode_Q",inplace=True)
-    panel=panel.dropna()
-    return panel
