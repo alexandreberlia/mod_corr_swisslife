@@ -254,3 +254,193 @@ Lisez la colonne `contribution`, pas les pourcentages : quand contributions posi
 | `panel_trimestriel.csv` | panel prêt à l'emploi |
 | `classement_*.csv` | résultats par cible |
 | `cycle_score_poids_fixes.csv` | historique du score |
+
+
+# La courbe des taux : le résultat qui a demandé trois tentatives
+
+Cette section documente le seul résultat solide obtenu sur les taux d'intérêt, et surtout les deux échecs qui l'ont précédé. Ces échecs ne venaient pas de la variable mais de la **cible** — c'est la leçon à retenir.
+
+---
+
+## Le résultat
+
+**Spread 5 ans − 3 mois, contre l'entrée en récession NBER, données mensuelles :**
+
+| | |
+|---|---|
+| avance | **12 mois** |
+| pseudo-R² de McFadden | **0,17** |
+| coefficient | **−0,644** |
+| p globale (corrigée des horizons) | **0,010** |
+| événements | 12 |
+
+Les quatre conditions d'un résultat exploitable sont réunies : signe correct, avance conforme à la littérature, ajustement dans la fourchette attendue, significativité qui survit à la correction.
+
+Après Bonferroni sur les trois spreads testés, p = 0,03. Et comme le test sur-rejette légèrement (mesuré à 15 % au seuil nominal de 10 %), la lecture prudente est « environ 0,015 ». Le résultat tient dans les deux cas.
+
+### Lecture du coefficient
+
+Le coefficient probit ne s'interprète pas directement : il agit sur un indice latent, pas sur la probabilité. Avec un taux de base de 1,4 % par mois (12 entrées sur ~870 mois) :
+
+| spread 5 ans − 3 mois | P(entrée en récession ce mois) | effet marginal |
+|---|---|---|
+| +3,0 pt | 0,002 % | −0,005 pp |
+| +2,0 pt | 0,024 % | −0,058 pp |
+| +1,0 pt | 0,22 % | −0,45 pp |
+| 0,0 pt (courbe plate) | 1,4 % | −2,27 pp |
+| **−1,0 pt (inversée)** | **5,9 %** | **−7,61 pp** |
+
+Cumulé sur douze mois, à spread constant :
+
+| spread | P(au moins une entrée dans l'année) |
+|---|---|
+| +2 pt | 0,3 % |
+| 0 pt | 15 % |
+| **−1 pt** | **52 %** |
+
+Une inversion d'un point fait passer la probabilité de récession à un an de quasi nulle à une chance sur deux.
+
+**L'effet marginal n'est pas constant** — il vaut −0,06 pp à +2 pt de spread et −7,6 pp à −1 pt. C'est la non-linéarité du probit : quand la situation est déjà tendue, une dégradation supplémentaire pèse beaucoup plus lourd.
+
+---
+
+## Les deux échecs qui ont précédé
+
+### Échec 1 — cible : la croissance du PIB
+
+```
+T10Y3M   pic +1 trim.   rho = −0,08   p_max = 0,97
+```
+
+Rien. Interprétation initiale : la pente ne fonctionne pas sur ces données.
+
+**Interprétation correcte : la pente ne prédit pas un taux de croissance.** Elle prédit des *retournements*. Le PIB en glissement annuel est une variable continue et bruitée ; chercher un lien linéaire avec elle revient à poser la mauvaise question.
+
+Preuve indirecte : contre la variation du Fed Funds, la même pente ressortait avec l'IPD le plus serré du tableau ([3;5] trimestres) et le β le plus élevé. Elle prédit bien quelque chose — la politique monétaire, pas l'activité.
+
+### Échec 2 — cible : toute transition de phase
+
+```
+T10Y3M   avance +6   pseudo-R² = 0,009   p = 0,558
+```
+
+Toujours rien. Mais cette fois le diagnostic est net :
+
+| cible | événements | avance | pseudo-R² | p |
+|---|---|---|---|---|
+| toute transition | 40 | +6 | **0,009** | 0,558 |
+| entrée en Décrochage seulement | 8 | +3 | **0,261** | 0,018 |
+| entrée en récession NBER | 10 | +3 | 0,185 | 0,039 |
+
+Le pseudo-R² est multiplié par **trente** en ciblant les seules transitions vers le bas.
+
+**Pourquoi.** L'indicatrice « toute transition » regroupe les quatre types : Explosion→Ralentissement, Reprise→Explosion, Décrochage→Reprise, Ralentissement→Décrochage. La pente n'en prédit qu'un seul — la dégradation. On lui demandait d'annoncer aussi bien un décrochage qu'une sortie de récession, deux configurations de courbe opposées. Les 8 événements qu'elle sait prédire étaient noyés dans 32 qu'elle ne prédit pas.
+
+C'est le même mécanisme que les risques concurrents sur l'ISM : **un signal qui agit en sens opposés selon la destination se moyenne à zéro quand on agrège.**
+
+### Le piège qui restait — 3 événements
+
+Le pseudo-R² de 0,261 ci-dessus semblait valider l'approche. Il ne valait rien.
+
+Les 8 entrées en Décrochage sont : 1953Q3, 1955Q4, 1969Q4, 1974Q1, 1980Q1, 1990Q3, 2001Q3, 2007Q4. Or `T10Y3M` du panel Bloomberg ne commence qu'en **1982Q1**. Après alignement, il restait **trois** événements : 1990Q3, 2001Q3, 2007Q4.
+
+Un probit à deux paramètres sur trois événements n'est pas une estimation.
+
+| série | début | entrées en Décrochage exploitables |
+|---|---|---|
+| T10Y3M (panel) | 1982Q1 | **3** |
+| NAPMPMI | 1970Q1 | 5 |
+| NHSPATOT | 1970Q1 | 5 |
+| GS5 − TB3MS (reconstruit) | 1953 | **12** (NBER) |
+
+**Vérification à faire systématiquement avant toute conclusion :**
+
+```python
+print(cible_binaire.reindex(serie.dropna().index).sum())
+```
+
+---
+
+## Les deux corrections décisives
+
+### 1. Cibler l'événement, pas l'état
+
+Une indicatrice de **niveau** (`USREC` brut, qui vaut 1 pendant toute la récession) déplace le pic d'ajustement au milieu de l'épisode. Pour mesurer une avance, il faut l'indicatrice de **transition** :
+
+```python
+from usrec import usrec_entree
+y = usrec_entree("M")      # 1 au seul mois d'entrée en récession — 12 événements
+```
+
+### 2. Récupérer l'historique long
+
+Le spread reconstruit depuis FRED (`GS5`, `TB3MS`, disponibles depuis 1953) porte **12 événements** au lieu des 3 du panel Bloomberg. C'est le seul geste de toute la démarche qui *multiplie* l'information disponible plutôt que de la redistribuer.
+
+Bénéfice supplémentaire : le NBER est une cible **externe**, indépendante du filtre de Hamilton dont dérivent les phases. Toute validation menée contre la datation maison est partiellement circulaire.
+
+---
+
+## Reproduire
+
+```python
+import pandas as pd
+from usrec import usrec_entree
+from leadlag import leadlag_probit
+from diagnostics import screen_panel
+
+# 1. Séries FRED (GS5, GS10, GS2, TB3MS), mensuelles
+taux = pd.read_csv("taux_fred.csv", index_col=0, parse_dates=True)
+taux.index = pd.PeriodIndex(taux.index, freq="M")
+
+# 2. Spreads — jamais les niveaux bruts, qui sont intégrés
+taux["spread_5y_ff"] = taux["GS5"] - taux["TB3MS"]
+taux["pente_2_5"]    = taux["GS5"] - taux["GS2"]
+taux["papillon"]     = 2*taux["GS5"] - taux["GS2"] - taux["GS10"]
+
+# 3. Crible de stationnarité
+ok = screen_panel(taux).query("verdict == 'stationnaire'").serie.tolist()
+
+# 4. Cible : entrée en récession
+y = usrec_entree("M")
+
+# 5. Test
+for c in ok:
+    n_ev = int(y.reindex(taux[c].dropna().index).sum())
+    r = leadlag_probit(taux[c], y, max_lag=24, min_lag=3, n_boot=200)
+    j = list(r.lags).index(r.best_lag)
+    print(f"{c:16s} n_ev={n_ev:2d}  avance={r.best_lag:3d} mois  "
+          f"R2={r.best_stat:.3f}  p={r.p_global:.3f}  "
+          f"coef={r.detail['coef'][j]:+.4f}")
+```
+
+`min_lag=3` élimine les décalages inexploitables une fois le délai de publication déduit. `max_lag=24` couvre la fourchette attendue de 12 à 18 mois.
+
+---
+
+## Ce qui reste à vérifier
+
+**La stabilité post-2008.** L'assouplissement quantitatif a comprimé la prime de terme, et l'inversion de 2022-2024 n'a été suivie d'aucune récession à ce jour. Réestimez sur 1953-2007 et comparez : si le coefficient s'affaiblit nettement en incluant la période récente, le signal est sous tension. C'est le débat en cours dans la littérature, et cela conditionne l'usage qu'on peut en faire aujourd'hui.
+
+Deux correctifs existent si c'est le cas : soustraire la prime de terme estimée (Adrian-Crump-Moench) pour ne garder que la composante anticipations, ou passer au *near-term forward spread* d'Engstrom-Sharpe (2018).
+
+**L'intégration au modèle de durée.** Le spread devient une covariable :
+
+```python
+ex = pd.DataFrame({"spread5": spread.shift(4)})    # 12 mois = 4 trimestres
+m = CycleModel(mutualise=True).fit(phases["phase"], exog=ex)
+m.calibrate(m.backtest(phases["phase"], debut="1970Q1", H=4, exog=ex))
+```
+
+**Le critère de succès est chiffré** : le plafond de calibration doit dépasser **44 %**, valeur mesurée sans covariable. Si le spread apporte réellement de la discrimination, la tranche haute doit monter. S'il ne bouge pas malgré une significativité au probit, le problème n'est pas le choix de covariable mais le nombre de transitions — et il faudra basculer le modèle de durée lui-même sur les récessions NBER plutôt que sur les phases maison.
+
+---
+
+## Ce que cet épisode enseigne
+
+Trois principes, applicables au-delà des taux.
+
+**La cible fait le résultat.** La même variable donne p = 0,97, p = 0,558 ou p = 0,010 selon ce qu'on lui demande de prédire. Avant de conclure qu'une variable ne fonctionne pas, vérifier qu'on lui pose la bonne question.
+
+**Agréger des événements hétérogènes détruit le signal.** Quatre types de transition mélangés, un signal qui n'en prédit qu'un : le pseudo-R² tombe de 0,26 à 0,009. Le même mécanisme rendait l'ISM invisible dans le hasard agrégé.
+
+**Compter les événements avant de lire les p-values.** Un pseudo-R² de 0,26 sur trois événements ne vaut rien, et rien dans la sortie ne le signale. L'effectif effectif après alignement est le premier chiffre à vérifier, pas le dernier.
