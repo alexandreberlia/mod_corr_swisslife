@@ -444,3 +444,146 @@ Trois principes, applicables au-delà des taux.
 **Agréger des événements hétérogènes détruit le signal.** Quatre types de transition mélangés, un signal qui n'en prédit qu'un : le pseudo-R² tombe de 0,26 à 0,009. Le même mécanisme rendait l'ISM invisible dans le hasard agrégé.
 
 **Compter les événements avant de lire les p-values.** Un pseudo-R² de 0,26 sur trois événements ne vaut rien, et rien dans la sortie ne le signale. L'effectif effectif après alignement est le premier chiffre à vérifier, pas le dernier.
+
+# Faut-il prévoir le score ? Non — et voici pourquoi
+
+Le module `prevision.py` contient une fonction `forecast_score` qui projette le score d'activité à un horizon donné, avec intervalle de prévision. Elle fonctionne techniquement. Elle n'est pas utile.
+
+Cette note documente les trois mesures qui mènent à cette conclusion, et ce qu'il faut faire à la place.
+
+---
+
+## Le raisonnement qui semblait naturel
+
+On dispose d'un score 0-100 qui résume l'état du cycle. Il paraît logique de vouloir sa valeur future : *« le score sera-t-il à 30 ou à 60 dans un an ? »*
+
+L'ajustement en échantillon donne d'ailleurs des chiffres encourageants :
+
+| horizon | R² |
+|---|---|
+| 1 trimestre | 0,79 |
+| 2 trimestres | 0,53 |
+| 3 trimestres | 0,30 |
+| 4 trimestres | 0,11 |
+
+Le problème est que ces R² ne mesurent presque rien : à l'horizon 1, le score futur ressemble au score présent, et n'importe quel modèle qui recopie la valeur courante obtient 0,79.
+
+---
+
+## Mesure 1 — le plancher de bruit
+
+Le score n'est pas une quantité observée, c'est une construction. En retirant au hasard une composante de chaque bloc et en recalculant tout, on obtient sa **précision intrinsèque** :
+
+| | |
+|---|---|
+| écart-type du score (bruit de composition) | **3,8 pt** |
+| erreur absolue minimale atteignable | **4,3 pt** |
+
+Ce second chiffre est le résultat décisif. Même avec une prévision **parfaite** de la « vraie » valeur, l'écart mesuré avec le score effectivement calculé serait de 4,3 points en moyenne — parce que la cible elle-même est bruitée.
+
+Autrement dit : **un score de 40 est en réalité 40 ± 6**, et prévoir sa valeur à l'unité près n'a pas de sens.
+
+---
+
+## Mesure 2 — le gain sur la persistance, une fois le plancher déduit
+
+Backtest à fenêtre croissante, réestimation à chaque date :
+
+| horizon | erreur modèle | erreur naïve | plancher | **gain réel** |
+|---|---|---|---|---|
+| 1 trim. | 8,4 | 8,6 | 4,3 | **4 %** |
+| 2 trim. | 12,8 | 13,4 | 4,3 | **7 %** |
+| 4 trim. | 17,0 | 20,3 | 4,3 | **21 %** |
+
+La référence naïve est « le score ne bouge pas ». Le gain brut semble modeste ; le gain *réel* — après avoir retiré la part d'erreur qu'aucun modèle ne peut éliminer — est de 4 à 7 % aux horizons courts.
+
+Un modèle qui améliore la persistance de 4 % ne justifie pas d'exister.
+
+Le gain de 21 % à quatre trimestres est plus substantiel, mais il porte sur une erreur de 17 points sur une échelle de 100 : la prévision est alors trop imprécise pour distinguer un ralentissement d'une expansion.
+
+---
+
+## Mesure 3 — prévoir le score dégrade l'information
+
+Le test qui tranche. Question identique : *« y aura-t-il une récession dans k trimestres ? »*, résolue de deux façons.
+
+| horizon | **prévoir** le score, puis le lire | **utiliser** le score actuel |
+|---|---|---|
+| 1 trim. | AUC 0,824 | AUC 0,826 |
+| 2 trim. | AUC 0,661 | **AUC 0,704** |
+| 3 trim. | AUC 0,530 | **AUC 0,603** |
+| 4 trim. | AUC 0,366 | **AUC 0,502** |
+
+**La voie indirecte est systématiquement moins bonne**, et l'écart se creuse avec l'horizon. À quatre trimestres, prévoir le score donne une AUC de 0,366 — *pire que le hasard*, c'est-à-dire que la prévision inverse le signal.
+
+L'explication est simple. Le score courant contient déjà l'information avancée : c'est précisément ce que fait le bloc « avancé ». Le prévoir revient à faire passer cette information par un modèle autorégressif, qui la lisse vers la moyenne et détruit ce qui la rendait utile.
+
+---
+
+## Ce qu'il faut faire à la place
+
+### Pour situer le présent
+
+Lisez le score tel quel, **par tranche**, jamais à l'unité.
+
+```python
+from cycle_score import build_score_3blocs, libelle
+S = build_score_3blocs(panel)
+print(S.score_global.dropna().tail())
+```
+
+| score | lecture |
+|---|---|
+| < 15 | contraction sévère — récession en cours |
+| 15 – 30 | contraction |
+| 30 – 45 | ralentissement |
+| 45 – 55 | proche de la tendance |
+| 55 – 70 | expansion modérée |
+| > 70 | expansion soutenue |
+
+Un passage de 44 à 52 n'est pas un signal : c'est du bruit de composition.
+
+### Pour regarder devant
+
+Utilisez le **bloc avancé seul**, avec `poids_globaux=(1, 0, 0)`. Au-delà d'un trimestre, il domine tout mélange incluant le coïncident :
+
+| horizon | score global | bloc avancé |
+|---|---|---|
+| 1 | 0,793 | **0,843** |
+| 2 | 0,668 | **0,735** |
+| 3 | 0,563 | **0,633** |
+
+### Pour prévoir un changement de régime
+
+Ne passez pas par le score. Modélisez directement l'événement :
+
+```python
+from cycle_model import CycleModel
+m = CycleModel(mutualise=True).fit(phases["phase"], exog=ex)
+m.calibrate(m.backtest(phases["phase"], debut="1985-01", H=12, exog=ex))
+print(m.explain(H=12, x={"ism": 48.7}))
+```
+
+Le modèle de durée répond à la bonne question — *quand cela va-t-il changer, et vers quoi* — sans passer par un intermédiaire continu qui perd de l'information.
+
+---
+
+## Le principe général
+
+**Prévoir un indicateur avancé est un contresens.** Un indicateur avancé vaut par ce qu'il dit du futur ; le projeter dans le futur revient à demander à un modèle statistique de faire le travail que l'indicateur faisait déjà, en moins bien.
+
+La règle : si l'on veut savoir quelque chose sur $t+k$, on régresse directement cette chose sur l'information disponible en $t$. On n'interpose pas une variable intermédiaire qu'il faudrait elle-même prévoir.
+
+C'est exactement l'argument des prévisions **directes** contre les prévisions **itérées** (Marcellino-Stock-Watson, 2006) : chaque étape intermédiaire ajoute son erreur de spécification sans rien apporter.
+
+---
+
+## Faut-il supprimer `forecast_score` ?
+
+Non, elle garde deux usages.
+
+**Mesurer la persistance du score.** Le R² de 0,79 à un trimestre quantifie à quel point le cycle est inerte — information utile en soi.
+
+**Fabriquer un banc d'essai.** Toute méthode prétendant prévoir l'état du cycle doit battre cette référence. Elle sert de plancher, pas d'outil.
+
+Ce qu'il ne faut pas faire : publier « le score sera à 47 dans un an » comme un résultat. L'intervalle à 80 % de cette prévision couvre [18 ; 73], soit plus de la moitié de l'échelle.
