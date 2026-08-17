@@ -1,125 +1,135 @@
-import pandas as pd
 import numpy as np
-import numpy.random as rd
-import yfinance as yf
-from datetime import date,datetime,timedelta
+import pandas as pd
 
-class indicateurs:
 
-    def __init__(self,
-                df:pd.DataFrame,
-                seed:int,
-                burnin:bool=True,
-                ):
-        self.seed=seed
-        self.df=df
-        self.price=df["Close"].astype(float)
-        self._cache={}
-        self.burnin=burnin
+class Indicateurs:
+    """Indicateurs techniques. Toute méthode renvoie une pd.Series alignée sur l'index."""
 
-    def ema(self,n:int):
-        key=("ema",n)
+    def __init__(self, df: pd.DataFrame, burnin: bool = True, source: str = "Close"):
+        # yfinance récent renvoie parfois des colonnes MultiIndex
+        if isinstance(df.columns, pd.MultiIndex):
+            df = df.copy()
+            df.columns = df.columns.get_level_values(0)
+
+        self.df = df
+        self.burnin = burnin
+        self.price = df[source].astype(float)
+        self.high = df["High"].astype(float)
+        self.low = df["Low"].astype(float)
+        self.close = df["Close"].astype(float)
+        self.volume = df["Volume"].astype(float)
+        self._cache = {}
+
+    # ---------- infrastructure ----------
+
+    def _get(self, key, compute, warmup: int):
+        """Cache + burn-in + copie défensive."""
         if key not in self._cache:
-            out=self._ema(self.price,n)
-            if self.burnin:
-                out.iloc[:n*5]=np.nan
-            self._cache[key]=out.rename(f"ema{n}")
-        return self._cache[key]
-    def sma(self,n:int):
-        key=("sma",n)
-        if key not in self._cache:
-            self._cache[key]=out.rename(f"ema{n}")
-        return self._cache[key]
+            s = compute()
+            if self.burnin and warmup:
+                s.iloc[:warmup] = np.nan
+            self._cache[key] = s
+        return self._cache[key].copy()
+
+    # ---------- moyennes ----------
+
+    def ema(self, n: int) -> pd.Series:
+        return self._get(("ema", n),
+                         lambda: self._ema(self.price, n).rename(f"ema{n}"),
+                         5 * n)
+
+    def sma(self, n: int) -> pd.Series:
+        return self._get(("sma", n),
+                         lambda: self.price.rolling(n).mean().rename(f"sma{n}"),
+                         n)
 
     @staticmethod
-
-    def _ema(s:pd.Series,
-             n:int,
-             ):
-        alpha=2.0/(n+1)
-        vals=s.to_numpy()
-        out=np.full(len(vals),np.nan)
-        ema=None
-        for i,p in enumerate(vals):
+    def _ema(s: pd.Series, n: int) -> pd.Series:
+        """Récurrence explicite, seed = première valeur, NaN-safe."""
+        alpha = 2.0 / (n + 1)
+        vals = s.to_numpy()
+        out = np.full(len(vals), np.nan)
+        ema = None
+        for i, p in enumerate(vals):
             if np.isnan(p):
-                out[i]=ema if ema is not None else np.nan
+                out[i] = ema if ema is not None else np.nan
                 continue
-            ema=p if ema is None else ema+alpha*(p-ema)
-            out[i]=ema
-        return pd.Series(out,index=s.index)
+            ema = p if ema is None else ema + alpha * (p - ema)
+            out[i] = ema
+        return pd.Series(out, index=s.index)
 
-    def TR(m=14):
-        TR=[1]
-        for i in range(m):
-                TR.append(max(self.p_h[len(self.p_h)-14+i]-self.p_b[len(self.p_b)-14+i],
-                        abs(self.p_h[len(self.p_h)-14+i]-self.cloture[len(self.cloture)-14+i]),
-                        abs(self.p_b[len(self.p_b)-14+i]-self.cloture[len(self.cloture)-14+i])))
-        return TR
+    @staticmethod
+    def _wilder(s: pd.Series, n: int) -> pd.Series:
+        """Lissage de Wilder : alpha = 1/n (≈ 2x plus lent qu'une EMA(n))."""
+        return s.ewm(alpha=1.0 / n, adjust=False).mean()
 
-    def ATR(m=14):
-        ATR=[]
-        ATR.append(TR.mean())
-        ATR.append(np.mean(self.TR()))
-        for i in range(1,m+1):
-            ATR.append((ATR[i-1]*13+self.TR([i]))/14)
-        return ATR
+    # ---------- volatilité ----------
 
-    def ROC(n:int):
-        return ((float(self.df.loc[date.today().strftime("%Y-%m-%d"),"Close"])-float(self.df.loc[(date.today()-timedelta(days=14)).strftime("%Y-%m-%d"),"Close"]))*100/(float(self.df.loc[(date.today()-timedelta(days=14)).strftime("%Y-%m-%d")])))
-    def ROVL(n=50):
-        return float(df.loc[date.today().strftime("%Y-%m-%d"),"Volume"])/float(df["Volume"].tail(n).mean())
+    def tr(self) -> pd.Series:
+        """True Range. Aucun paramètre : une valeur par barre."""
+        def _c():
+            prev_close = self.close.shift(1)
+            return pd.concat([
+                self.high - self.low,
+                (self.high - prev_close).abs(),
+                (self.low - prev_close).abs(),
+            ], axis=1).max(axis=1).rename("tr")
+        return self._get(("tr",), _c, 1)
 
-    def VWAP(ancrage:str):   # acrage = "Y-m-d"
-        vwap=0
-        volume=0
-        seuil=df["Volume"].loc[ancrage:].count()
-        for i in range(1,seuil+1):
-            vwap=(df["High"].iloc[-i]+df["Low"].iloc[-i]+df["Close"].iloc[-i])*df["Volume"].iloc[-i]/3
-            volume+=df["Volume"].iloc[-i]
-        return vwap/volume
+    def atr(self, n: int = 14) -> pd.Series:
+        return self._get(("atr", n),
+                         lambda: self._wilder(self.tr(), n).rename(f"atr{n}"),
+                         5 * n)
 
-    def adx(n=14):
-        mvt_h=[]
-        mvt_b=[]
-        dmp=[]
-        dmn=[]
-        ADX=[]
-        TR14=[]
-        DM14_p=[]
-        DM14_n=[]
-        for i in range(n):
-            mvt_h.append(df["High"].iloc[-1-i]-df["High"].iloc[-2-i])
-            mvt_b.append(df["Low"].iloc[-1-i]-df["Low"].iloc[-2-i])
-            dmp.append(max(0,mvt_h[i]-mvt_b[i]))
-            dmn.append(max(0,mvt_b[i]-mvt_h[i]))
-        TR14.append(sum(self.TR()))
-        DM14_p.append(sum(mvt_h))
-        DM14_n.append(sum(dm_b))              
-        for i in range(1,n+1):
-            TR14.append(TR14[i-1]-(TR14[i-1]/14)+self.TR()[i])
-            DM14_p.append(DM14_p[i-1]-(DM14_p[i-1]/14)+dmp[i])
-            DM14_n.append(DM14_n[i-1]-(DM14_n[i-1]/14)+dmn[i])
-        DI14_p=100*(DM14_p/TR14)
-        DI14_n=100*(DM14_n/TR14)
-        DX=100*abs(DI14_p-DI14_n)/(DI14_n+DI14_p)
-        ADX.append(np.mean(DX))
-        for i in range(1,n):
-            ADX.append((ADX[i-1]*13+DX[i])/14)
-        return ADX
+    # ---------- momentum ----------
 
+    def roc(self, n: int = 14) -> pd.Series:
+        """Rate of Change en %, sur n SÉANCES (pas jours calendaires)."""
+        return self._get(("roc", n),
+                         lambda: (self.price.pct_change(n) * 100).rename(f"roc{n}"),
+                         n)
 
+    # ---------- volume ----------
 
+    def rvol(self, n: int = 50) -> pd.Series:
+        """Volume du jour / médiane des n jours PRÉCÉDENTS (exclut le jour même)."""
+        def _c():
+            ref = self.volume.shift(1).rolling(n).median()
+            return (self.volume / ref).rename(f"rvol{n}")
+        return self._get(("rvol", n), _c, n + 1)
 
+    def avwap(self, ancrage) -> pd.Series:
+        """VWAP ancré. `ancrage` : date str/Timestamp, ou Series booléenne (multi-ancres)."""
+        hlc3 = (self.high + self.low + self.close) / 3
+        pv = hlc3 * self.volume
 
+        if isinstance(ancrage, pd.Series):
+            grp = ancrage.astype(bool).cumsum()
+            num = pv.groupby(grp).cumsum()
+            den = self.volume.groupby(grp).cumsum()
+        else:
+            mask = self.df.index >= pd.Timestamp(ancrage)
+            num = pv.where(mask).cumsum()
+            den = self.volume.where(mask).cumsum()
 
+        return (num / den).rename("avwap")
 
+    # ---------- régime ----------
 
-    
-        
+    def adx(self, n: int = 14) -> pd.Series:
+        def _c():
+            up = self.high.diff()
+            down = -self.low.diff()          # attention au signe
 
+            plus_dm = pd.Series(np.where((up > down) & (up > 0), up, 0.0),
+                                index=self.df.index)
+            minus_dm = pd.Series(np.where((down > up) & (down > 0), down, 0.0),
+                                 index=self.df.index)
 
-            
+            atr = self._wilder(self.tr(), n)
+            plus_di = 100 * self._wilder(plus_dm, n) / atr
+            minus_di = 100 * self._wilder(minus_dm, n) / atr
 
-
-                
-        
+            dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+            return self._wilder(dx, n).rename(f"adx{n}")
+        return self._get(("adx", n), _c, 5 * n)
