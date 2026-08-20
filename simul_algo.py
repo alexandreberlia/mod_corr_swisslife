@@ -30,9 +30,6 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from features import features_orientees, calibrer, AUX
-from portefeuille import (ParamsPF, Portefeuille, construire_panels, stats,
-                          rank_cs)
 
 
 # ============================================================================
