@@ -7,9 +7,6 @@ import warnings; warnings.filterwarnings("ignore")
 import pandas as pd
 import yfinance as yf
 
-from indicateurs import Indicateurs
-from portefeuille import ParamsPF
-from simulation import simuler, test_causalite
 
 # ============================================================ À RENSEIGNER
 DATE_DEBUT = "2025-01-01"      # première date où une position peut être ouverte
