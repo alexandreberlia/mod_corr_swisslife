@@ -382,8 +382,28 @@ class Portefeuille:
             expo[i] = val_pos / courbe[i] if courbe[i] > 0 else 0.0
 
         eq = pd.Series(courbe, index=idx).ffill().fillna(capital)
+
+        # positions encore ouvertes a la derniere date, valorisees au dernier cours
+        d_fin = idx[-1]
+        ouvertes = []
+        for t, s in pos.items():
+            px = cl.loc[d_fin, t]
+            if np.isnan(px):
+                continue
+            frais_in = s["qty"] * s["px_in"] * cost
+            ouvertes.append({
+                "ticker": t, "entree": s["date_in"], "px_entree": s["px_in"],
+                "px_actuel": px, "qty": s["qty"],
+                "valeur": s["qty"] * px, "stop": s["stop"],
+                "frais": frais_in,
+                "pnl_latent": (px - s["px_in"]) * s["qty"] - frais_in,
+                "ret_%": ((px - s["px_in"]) * s["qty"] - frais_in) / (s["px_in"] * s["qty"]) * 100,
+                "jours": s["held"],
+            })
+
         return {"equity": eq, "trades": pd.DataFrame(trades),
-                "exposition": pd.Series(expo, index=idx), "params": p}
+                "positions": pd.DataFrame(ouvertes),
+                "cash": cash, "exposition": pd.Series(expo, index=idx), "params": p}
 
 
 def _trade(t, s, d_out, px_out, motif, cost):
