@@ -1,79 +1,127 @@
 """
-pipeline_complet.py — chaîne de bout en bout.
-Nécessite : indicateurs.py (ta classe), features.py, portefeuille.py
+exemple_selection_combi.py — générer des combinaisons, les tester en
+CLASSIFICATION BINAIRE (hausse/baisse), garder la meilleure par horizon.
+
+    python exemple_selection_combi.py
 """
 import warnings; warnings.filterwarnings("ignore")
 import pandas as pd
 import yfinance as yf
 
 from indicateurs import Indicateurs
-from features import features_orientees, calibrer
-from portefeuille import ParamsPF, Portefeuille, construire_panels, stats
+from features import (features_completes, definir_combinaisons, evaluer_binaire,
+                      classer_combinaisons, resume_selection, FAMILLES, HORIZONS_DEFAUT)
+from portefeuille import ParamsPF, construire_panels
 
-# ------------------------------------------------------------------ 1. univers
-TICKERS = ["AAPL","MSFT","NVDA","GOOGL","AMZN","META","JPM","BAC","XOM","CVX",
-           "JNJ","PFE","PG","KO","CAT","HON","UNH","V","MA","HD"]
-SECTEURS = pd.Series({
-    "AAPL":"Tech","MSFT":"Tech","NVDA":"Tech","GOOGL":"Tech","META":"Tech",
-    "AMZN":"Conso","PG":"Conso","KO":"Conso","HD":"Conso",
-    "JPM":"Finance","BAC":"Finance","V":"Finance","MA":"Finance",
-    "XOM":"Energie","CVX":"Energie",
-    "JNJ":"Sante","PFE":"Sante","UNH":"Sante",
-    "CAT":"Indus","HON":"Indus",
-})
+# ---------------------------------------------------------------- 1. univers
+# Le bruit décroît en 1/sqrt(n). Sous ~100 titres, rien n'est détectable.
+TICKERS = ["AAPL","MSFT","NVDA","GOOGL","AMZN","META","TSLA","AVGO","ORCL","CRM",
+           "AMD","INTC","CSCO","ADBE","QCOM","TXN","IBM","NOW","INTU","MU",
+           "JPM","BAC","WFC","GS","MS","V","MA","AXP","BLK","SCHW",
+           "JNJ","PFE","UNH","ABBV","MRK","LLY","TMO","ABT","BMY","AMGN",
+           "XOM","CVX","COP","SLB","EOG","PG","KO","PEP","WMT","COST",
+           "HD","MCD","NKE","SBUX","TGT","CAT","HON","GE","BA","MMM",
+           "UPS","RTX","LMT","DE","UNP","LOW","CVS","T","VZ","CMCSA"]
 
-brut = yf.download(TICKERS, start="2015-01-01", auto_adjust=True,
+brut = yf.download(TICKERS, start="2014-01-01", auto_adjust=True,
                    group_by="ticker", progress=False)
-prix = {t: brut[t].dropna() for t in TICKERS
-        if t in brut.columns.get_level_values(0)}
+prix = {t: brut[t].dropna() for t in TICKERS if t in brut.columns.get_level_values(0)}
 print(f"{len(prix)} titres chargés")
 
-# ------------------------------------------------- 2. réglages et panels
-# Règle : n_long <= (1 - rang_entree) x taille_univers, avec marge pour l'éligibilité.
-p = ParamsPF(
-    n_long=5, rang_entree=0.70, rang_sortie=0.40,
-    min_titres=8,                       # au plus la moitié de l'univers
-    dollar_vol_min=5e6, er_rank_min=0.35, adx_min=12.0,
-    stop_atr=2.5, trail_atr=5.0,
-    freq_rebal=5, cost_bps=10.0,
-)
-
-# generateur=features_orientees est OBLIGATOIRE si les poids viennent de l'IC
-panels = construire_panels(prix, Indicateurs, p, generateur=features_orientees)
+p = ParamsPF(min_titres=25)
+panels = construire_panels(prix, Indicateurs, p, generateur=features_completes)
 close = panels["close"]
 
-# --------------------------------- 3. calibration IN-SAMPLE uniquement
-# Calibrer sur toute la période puis backtester dessus = look-ahead pur.
-split = close.index[int(len(close) * 0.60)]
-poids, rapport, corr = calibrer(panels, close, split=split, horizon=20, n_max=5)
+print("\nFAMILLES D'INDICATEURS DISPONIBLES")
+for fam, feats in FAMILLES.items():
+    print(f"  {fam:<12} {feats}")
 
-print(f"\n=== IC in-sample (jusqu'au {split.date()}) ===")
-print(rapport[["feature","IC_moy","ic_bas","ic_haut","t_NW","significatif"]]
-      .round(3).to_string(index=False))
-print("\n=== POIDS CALIBRÉS ===")
-for k, v in poids.items():
-    print(f"  {k:<12} {v:+.3f}")
+# ------------------------------------------------- 2. TES CONVICTIONS
+# "volatilité en expansion + tendance haussière + cours AU NIVEAU de la MM qui
+#  monte (pas bien au-dessus : capter la hausse, pas arriver après) + volumes
+#  en augmentation"
+CONVICTIONS = {
+    "vol-expansion + MM qui monte": {
+        "score": {
+            "mom_glissant":    1.0,   # log-rendements glissants positifs
+            "proximite_ema50": 1.0,   # -|prix-MM|/ATR : proche de la MM
+            "pente_ema50":     0.8,   # ... mais MM en progression
+            "atr_expansion":   0.6,   # volatilité qui augmente
+            "vol_expansion":   0.5,   # volumes qui augmentent
+        },
+        "conditions": {
+            "pente_ema50":   (">", 0),    # MM effectivement haussière
+            "atr_expansion": (">", 0),    # vol effectivement en hausse
+            "vol_expansion": (">", 0),    # volume effectivement en hausse
+        },
+        "familles": {"momentum": "mom_glissant", "regime": "proximite_ema50",
+                     "volatilite": "atr_expansion", "volume": "vol_expansion"},
+    },
+    "variante juste_au_dessus (+0.3 ATR)": {
+        "score": {"mom_glissant": 1.0, "juste_au_dessus": 1.0,
+                  "atr_expansion": 0.6, "vol_expansion": 0.5},
+        "conditions": {"pente_ema50": (">", 0)},
+        "familles": {"momentum": "mom_glissant", "regime": "juste_au_dessus",
+                     "volatilite": "atr_expansion", "volume": "vol_expansion"},
+    },
+    "variante sans condition (score seul)": {
+        "score": {"mom_glissant": 1.0, "proximite_ema50": 1.0, "pente_ema50": 0.8,
+                  "atr_expansion": 0.6, "vol_expansion": 0.5},
+        "familles": {"momentum": "mom_glissant", "regime": "proximite_ema50",
+                     "volatilite": "atr_expansion", "volume": "vol_expansion"},
+    },
+}
 
-if not poids:
-    raise SystemExit("Aucune feature significative — élargir l'univers ou l'historique.")
+# ------------------------------------ 3. FONCTION 1 : générer les combinaisons
+# Une feature EXACTEMENT par famille obligatoire -> aucune combinaison n'est
+# "trois momentums déguisés". La famille volume est optionnelle.
+combis = definir_combinaisons(
+    obligatoires=("momentum", "regime", "volatilite"),
+    optionnelles=("volume",),
+    convictions=CONVICTIONS,
+    max_combis=200,
+)
+print(f"\n{len(combis)} combinaisons à tester "
+      f"(dont {len(CONVICTIONS)} convictions manuelles)")
 
-# --------------------------------------------- 4. backtest et carnet
-p.poids = poids
-pf = Portefeuille(panels, p, SECTEURS)
-res = pf.backtest(10_000)
+# --------------------------- 4. FONCTION 2 : évaluer UNE combinaison en détail
+print("\n" + "=" * 100)
+print("ÉVALUATION BINAIRE — ta conviction principale")
+print("=" * 100)
+ev = evaluer_binaire(combis["vol-expansion + MM qui monte"], panels, close,
+                     horizons=(5, 10, 21, 63, 252), q=0.10, min_titres=25)
+print(ev[["horizon", "taux_base_%", "prec_hausse_%", "prec_baisse_%", "lift_hausse",
+          "exactitude_%", "hasard_%", "edge_pt", "MCC", "ecart_repart_pt",
+          "t_NW", "significatif"]].round(2).to_string(index=False))
 
-print("\n=== PERFORMANCE ===")
-print(stats(res, close=close).round(2).to_string())
+# ------------------------------- 5. FONCTION 3 : classer et garder la meilleure
+print("\n" + "=" * 100)
+print("CLASSEMENT — meilleure combinaison par horizon")
+print("=" * 100)
+res = classer_combinaisons(combis, panels, close,
+                           horizons=HORIZONS_DEFAUT, critere="MCC",
+                           q=0.10, reference="zero", min_titres=25)
+print(resume_selection(res, top=8))
 
-oos = res["equity"].loc[split:]
-bh_oos = close.pct_change().loc[split:].mean(axis=1).add(1).cumprod()
-print(f"\nOUT-OF-SAMPLE ({split.date()} -> fin) :")
-print(f"  stratégie   : {(oos.iloc[-1]/oos.iloc[0]-1)*100:+.1f}%")
-print(f"  buy & hold  : {(bh_oos.iloc[-1]-1)*100:+.1f}%")
-print("  -> seul cet écart a une valeur probante.")
+print("\nRETENUES :")
+for groupe, nom in res["meilleures"].items():
+    print(f"  {groupe:<8} -> {nom}")
+    print(f"           familles : "
+          f"{combis[nom].get('familles', {})}")
 
-print("\n=== MOTIFS DE SORTIE ===")
-print(res["trades"].motif.value_counts().to_string())
+# ------------------------------------------------------- 6. contrôle marché
+# reference='mediane' : "hausse" = mieux que la médiane du panel ce jour-là.
+# Si l'edge s'effondre, la combinaison ne faisait que suivre le marché.
+print("\n" + "=" * 100)
+print("CONTRÔLE — même test, mais 'hausse' = surperformer la médiane du panel")
+print("=" * 100)
+res_rel = classer_combinaisons(combis, panels, close, critere="MCC",
+                               q=0.10, reference="mediane", min_titres=25,
+                               verbose=False)
+for groupe, nom in res_rel["meilleures"].items():
+    print(f"  {groupe:<8} -> {nom}")
+print("\nSi les combinaisons gagnantes changent complètement entre les deux")
+print("références, l'edge absolu venait surtout du bêta marché.")
 
-print("\n=== ORDRES DU JOUR ===")
-print(pf.book(equity=10_000).to_string(index=False))
+res["tableau"].to_csv("resultats_combinaisons.csv", index=False)
+print("\nDétail complet exporté : resultats_combinaisons.csv")
