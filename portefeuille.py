@@ -1,20 +1,26 @@
 """
-Moteur cross-sectionnel — classement de l'univers, allocation du capital, backtest.
+portefeuille.py — moteur cross-sectionnel : classement, allocation, backtest.
 
-Chaîne de traitement :
+RÔLE : machine de production. Ne regarde QUE le passé. Tourne tous les jours.
+
+CHAÎNE
     prix (dict ticker -> OHLCV)
-        -> panels de features        (dates x tickers)
-        -> winsorisation             (écrête les aberrants, à chaque date)
-        -> neutralisation secteur    (retire l'effet sectoriel)
-        -> rang percentile           (0-1, à chaque date, sur l'univers)
-        -> score composite           (moyenne pondérée des rangs)
-        -> filtre d'éligibilité      (régime, liquidité)
-        -> sélection + allocation    (pondération inverse-volatilité)
+      -> panels de features           (dates x tickers)
+      -> winsorisation                (écrête les aberrants, à chaque date)
+      -> neutralisation secteur       (retire l'effet sectoriel)
+      -> rang percentile CENTRÉ       (-0.5 à +0.5, à chaque date, sur l'univers)
+      -> score composite              (moyenne pondérée, normalisée par somme des |w|)
+      -> filtre d'éligibilité         (régime, liquidité)
+      -> sélection + allocation       (pondération inverse-volatilité)
 
-Ordre d'exécution à chaque rééquilibrage : SORTIES d'abord, ENTRÉES ensuite,
-pour que la liquidité libérée soit réinvestissable le jour même.
+ORDRE À CHAQUE RÉÉQUILIBRAGE : SORTIES d'abord, ENTRÉES ensuite, pour que la
+liquidité libérée soit réinvestissable le jour même.
 
-Convention : signaux évalués sur la clôture de J, exécution à l'ouverture de J+1.
+CONVENTION : signal évalué sur la clôture de J, exécution à l'OUVERTURE de J+1.
+
+LONG ONLY. La vente à découvert n'est pas implémentée — c'était une incohérence de
+la version précédente (book() générait des SHORT que backtest() ignorait). Mieux vaut
+une absence explicite qu'un mensonge silencieux.
 """
 
 from dataclasses import dataclass, field
@@ -28,23 +34,18 @@ import pandas as pd
 
 @dataclass
 class ParamsPF:
-    # --- score composite : feature -> poids ---
+    # --- score composite : feature -> poids (peut être négatif) ---
     poids: dict = field(default_factory=lambda: {
-        "mom_12_1": 1.00,    # momentum 12-1 : l'anomalie la mieux documentée
-        "rev_5":    0.40,    # réversion court terme (signe déjà inversé)
-        "ext50":    0.25,    # position vs EMA50, normalisée ATR
+        "mom_12_1": 1.00, "rev_5": 0.40, "ext_ema50": 0.25,
     })
     winsor: tuple = (0.02, 0.98)
     neutraliser_secteur: bool = True
     min_titres: int = 15          # sous ce seuil, pas de classement à cette date
 
-    # --- sélection ---
+    # --- sélection (long only) ---
     n_long: int = 10
-    n_short: int = 0              # 0 = long-only
     rang_entree: float = 0.85     # percentile mini pour ouvrir
-    rang_sortie: float = 0.50     # on ferme si le rang retombe sous ce seuil
-    rang_entree_short: float = 0.15
-    rang_sortie_short: float = 0.50
+    rang_sortie: float = 0.50     # hystérésis : on ferme sous ce seuil seulement
 
     # --- éligibilité ---
     er_rank_min: float = 0.45
@@ -60,8 +61,9 @@ class ParamsPF:
 
     # --- risque et sorties ---
     atr_n: int = 14
-    stop_atr: float = 2.5         # stop initial, en ATR
-    trail_atr: float = 3.5        # chandelier : plus haut depuis l'entrée - k*ATR
+    stop_atr: float = 2.5         # stop initial
+    trail_atr: float = 5.0        # chandelier. 3.5 donnait 58 % de sorties sur stop :
+                                  # trop serré, la position n'a pas la place de respirer.
     max_hold: int = 250
     sortie_regime: float = 0.20   # ER rank sous ce seuil -> sortie
 
@@ -74,32 +76,42 @@ class ParamsPF:
 # Construction des panels
 # ============================================================================
 
-def construire_panels(prix: dict, Indicateurs, p: ParamsPF) -> dict:
-    """prix : {ticker: DataFrame OHLCV}. Renvoie un dict de panels (dates x tickers)."""
+def construire_panels(prix: dict, Indicateurs, p: ParamsPF, generateur=None) -> dict:
+    """prix : {ticker: DataFrame OHLCV}. Renvoie un dict de panels (dates x tickers).
+
+    generateur : fonction ind -> dict[str, Series].
+                 None => jeu minimal. Passer `features_orientees` (features.py) pour
+                 le catalogue complet — OBLIGATOIRE si les poids viennent de l'IC.
+    """
     feats, aux = {}, {}
 
     for t, df in prix.items():
         ind = Indicateurs(df, burnin=False)
-        lr = ind.logret(ind.price, 1)
 
-        feats[t] = pd.DataFrame({
-            "mom_12_1": lr.rolling(252).sum() - lr.rolling(21).sum(),
-            "rev_5":   -lr.rolling(5).sum(),          # survendu = signal long
-            "ext50":    ind.ext(50, p.atr_n),
-        })
+        if generateur is not None:
+            feats[t] = pd.DataFrame(generateur(ind))
+        else:
+            lr = ind.logret(ind.price, 1)
+            feats[t] = pd.DataFrame({
+                "mom_12_1":  lr.rolling(252).sum() - lr.rolling(21).sum(),
+                "rev_5":    -lr.rolling(5).sum(),
+                "ext_ema50": ind.ext(50, p.atr_n),
+            })
+
+        # colonnes techniques : toujours nécessaires (exécution, stops, éligibilité)
         aux[t] = pd.DataFrame({
-            "close":  ind.close,
-            "open":   df["Open"].astype(float) if "Open" in df.columns else ind.close,
-            "high":   ind.high,
-            "low":    ind.low,
-            "atr":    ind.atr(p.atr_n),
-            "er_rk":  ind.rank_pct(ind.er(10), 252),
-            "adx":    ind.adx(p.atr_n),
-            "dvol":  (ind.close * ind.volume).rolling(20).median(),
+            "close": ind.close,
+            "open":  df["Open"].astype(float) if "Open" in df.columns else ind.close,
+            "high":  ind.high,
+            "low":   ind.low,
+            "atr":   ind.atr(p.atr_n),
+            "er_rk": ind.rank_pct(ind.er(10), 252),
+            "adx":   ind.adx(p.atr_n),
+            "dvol": (ind.close * ind.volume).rolling(20).median(),
         })
 
-    def panel(source, col):
-        return pd.DataFrame({t: d[col] for t, d in source.items()}).sort_index()
+    def panel(src, col):
+        return pd.DataFrame({t: d[col] for t, d in src.items()}).sort_index()
 
     out = {c: panel(feats, c) for c in next(iter(feats.values())).columns}
     out |= {c: panel(aux, c) for c in next(iter(aux.values())).columns}
@@ -111,7 +123,8 @@ def construire_panels(prix: dict, Indicateurs, p: ParamsPF) -> dict:
 # ============================================================================
 
 def winsorize_cs(df, lo=0.02, hi=0.98):
-    """Écrête les extrêmes ligne par ligne (à chaque date, sur l'univers)."""
+    """Écrête les extrêmes ligne par ligne (à chaque date, sur l'univers).
+    À faire AVANT la neutralisation : sinon un outlier pollue la moyenne sectorielle."""
     return df.clip(lower=df.quantile(lo, axis=1), upper=df.quantile(hi, axis=1), axis=0)
 
 
@@ -150,20 +163,36 @@ class Portefeuille:
 
     def _score(self):
         p = self.p
-        total = 0.0
-        acc = None
+
+        # validation : échouer bruyamment plutôt que silencieusement
+        demandees = {k for k, v in p.poids.items() if v != 0}
+        manquantes = demandees - set(self.pn)
+        if manquantes:
+            raise KeyError(
+                f"Features absentes des panels : {sorted(manquantes)}.\n"
+                f"Disponibles : {sorted(self.pn)}.\n"
+                f"-> construire_panels(..., generateur=features_orientees)"
+            )
+        if not demandees:
+            raise ValueError("Aucune feature avec un poids non nul dans ParamsPF.poids")
+
+        # Rangs CENTRÉS (-0.5 à +0.5) et normalisation par la somme des VALEURS
+        # ABSOLUES : les poids issus de poids_depuis_ic peuvent être négatifs. Diviser
+        # par la somme signée ferait exploser le score quand les poids se compensent
+        # (ex. {0.5, -0.45} -> diviseur 0.05 -> score x20).
+        acc, total = None, 0.0
         for nom, w in p.poids.items():
-            if nom not in self.pn or w == 0:
+            if w == 0:
                 continue
             x = winsorize_cs(self.pn[nom], *p.winsor)
             if p.neutraliser_secteur:
                 x = neutralize_cs(x, self.secteurs)
-            r = rank_cs(x, p.min_titres)
-            acc = r * w if acc is None else acc.add(r * w, fill_value=np.nan)
-            total += w
+            r = rank_cs(x, p.min_titres) - 0.5
+            acc = r * w if acc is None else acc + r * w
+            total += abs(w)
 
-        self.score = acc / total                       # moyenne pondérée des rangs
-        self.rang = rank_cs(self.score, p.min_titres)  # re-classement du composite
+        self.score = acc / total                       # borné [-0.5, +0.5]
+        self.rang = rank_cs(self.score, p.min_titres)
 
         self.eligible = (
             (self.pn["er_rk"] > p.er_rank_min)
@@ -176,8 +205,14 @@ class Portefeuille:
 
     # ---------- allocation ----------
 
-    def _poids_cibles(self, tickers, date, equity) -> pd.Series:
-        """Pondération des lignes retenues. inv_vol => risque € identique par ligne."""
+    def _poids_cibles(self, tickers, date) -> pd.Series:
+        """Pondération des lignes retenues.
+
+        inv_vol => risque en euros IDENTIQUE par ligne :
+            risque_i = capital_i x stop_atr x atr_pct_i
+                     ∝ (1/atr_pct_i) x atr_pct_i = constante
+        C'est ce qui réconcilie "allouer par poids" et "dimensionner par le risque".
+        """
         p = self.p
         if not len(tickers):
             return pd.Series(dtype=float)
@@ -187,7 +222,7 @@ class Portefeuille:
                     self.pn["close"].loc[date, tickers]).replace(0, np.nan)
             raw = 1.0 / atrp
         elif p.ponderation == "score":
-            raw = self.score.loc[date, tickers].clip(lower=0.01)
+            raw = (self.score.loc[date, tickers] + 0.5).clip(lower=0.01)
         else:
             raw = pd.Series(1.0, index=tickers)
 
@@ -197,62 +232,55 @@ class Portefeuille:
 
         w = raw / raw.sum() * p.exposition
 
-        # plafonnement itératif : l'excédent est redistribué sur les lignes non plafonnées.
-        # Si TOUTES sont plafonnées, l'exposition totale reste < p.exposition : c'est voulu
+        # plafonnement itératif : l'excédent est redistribué sur les non plafonnées.
+        # Si toutes sont plafonnées, l'exposition reste < p.exposition : c'est voulu
         # (moins de candidats que n_long => on n'investit pas tout, on ne concentre pas).
         for _ in range(10):
             trop = w > p.poids_max
             if not trop.any():
                 break
-            excedent = (w[trop] - p.poids_max).sum()
+            exc = (w[trop] - p.poids_max).sum()
             w[trop] = p.poids_max
             libre = ~trop
             if not libre.any() or w[libre].sum() <= 0:
                 break
-            w[libre] += excedent * w[libre] / w[libre].sum()
+            w[libre] += exc * w[libre] / w[libre].sum()
 
         return w[w >= p.poids_min]
 
     # ---------- carnet du jour (usage live) ----------
 
     def book(self, date=None, equity: float = 10_000.0) -> pd.DataFrame:
-        """Classement + allocation à une date. C'est l'ordre à passer."""
+        """Classement + allocation à une date. C'est l'ordre à passer. LONG ONLY."""
         p = self.p
         date = self.rang.index[-1] if date is None else pd.Timestamp(date)
 
-        rg = self.rang.loc[date]
-        el = self.eligible.loc[date]
-        px = self.pn["close"].loc[date]
-        atr = self.pn["atr"].loc[date]
+        rg, el = self.rang.loc[date], self.eligible.loc[date]
+        px, atr = self.pn["close"].loc[date], self.pn["atr"].loc[date]
 
-        longs = rg[(rg >= p.rang_entree) & el].nlargest(p.n_long).index
-        shorts = rg[(rg <= p.rang_entree_short) & el].nsmallest(p.n_short).index if p.n_short else []
+        sel = rg[(rg >= p.rang_entree) & el].nlargest(p.n_long).index
+        w = self._poids_cibles(list(sel), date)
 
         lignes = []
-        for cote, sel in (("LONG", longs), ("SHORT", shorts)):
-            if not len(sel):
-                continue
-            w = self._poids_cibles(list(sel), date, equity)
-            for t, wi in w.items():
-                capital = wi * equity
-                qty = capital / px[t]
-                dist = p.stop_atr * atr[t]
-                stop = px[t] - dist if cote == "LONG" else px[t] + dist
-                lignes.append({
-                    "ticker": t, "sens": cote,
-                    "rang": round(rg[t], 3), "score": round(self.score.loc[date, t], 3),
-                    "prix": round(px[t], 2), "poids_%": round(wi * 100, 2),
-                    "capital": round(capital, 2), "qty": round(qty, 4),
-                    "stop": round(stop, 2),
-                    "risque_€": round(qty * dist, 2),
-                    "risque_%_capital": round(qty * dist / equity * 100, 2),
-                    "atr_%": round(atr[t] / px[t] * 100, 2),
-                })
+        for t, wi in w.items():
+            capital = wi * equity
+            qty = capital / px[t]
+            dist = p.stop_atr * atr[t]
+            lignes.append({
+                "ticker": t, "sens": "LONG",
+                "rang": round(rg[t], 3), "score": round(self.score.loc[date, t], 3),
+                "prix": round(px[t], 2), "poids_%": round(wi * 100, 2),
+                "capital": round(capital, 2), "qty": round(qty, 4),
+                "stop": round(px[t] - dist, 2),
+                "risque_€": round(qty * dist, 2),
+                "risque_%": round(qty * dist / equity * 100, 2),
+                "atr_%": round(atr[t] / px[t] * 100, 2),
+            })
 
         cols = ["ticker", "sens", "rang", "score", "prix", "poids_%", "capital",
-                "qty", "stop", "risque_€", "risque_%_capital", "atr_%"]
-        df = pd.DataFrame(lignes, columns=cols)
-        return df.sort_values(["sens", "rang"], ascending=[True, False]).reset_index(drop=True)
+                "qty", "stop", "risque_€", "risque_%", "atr_%"]
+        return (pd.DataFrame(lignes, columns=cols)
+                .sort_values("rang", ascending=False).reset_index(drop=True))
 
     # ---------- backtest ----------
 
@@ -261,28 +289,31 @@ class Portefeuille:
         idx = self.rang.index
         cost = p.cost_bps / 10_000.0
 
-        op, hi, lo, cl = (self.pn["open"], self.pn["high"], self.pn["low"], self.pn["close"])
+        op, hi, lo, cl = (self.pn["open"], self.pn["high"],
+                          self.pn["low"], self.pn["close"])
         atr = self.pn["atr"]
 
         cash = capital
-        pos = {}                       # ticker -> dict(qty, px_in, date_in, stop, plus_haut, held)
-        trades, courbe = [], np.full(len(idx), np.nan)
+        pos = {}                       # ticker -> dict d'état
+        trades, courbe, expo = [], np.full(len(idx), np.nan), np.zeros(len(idx))
         ordres = {"sorties": [], "entrees": {}}
 
         for i, d in enumerate(idx):
             if i == 0:
                 courbe[i] = cash
                 continue
-            dv = idx[i - 1]            # barre de décision (la veille)
+            dv = idx[i - 1]
 
             # ---- 1. exécution des ordres décidés hier, à l'ouverture ----
             for t in ordres["sorties"]:
                 if t in pos and not np.isnan(op.loc[d, t]):
                     px = op.loc[d, t]
                     cash += pos[t]["qty"] * px * (1 - cost)
-                    trades.append(_trade(t, pos.pop(t), d, px, "signal"))
+                    trades.append(_trade(t, pos.pop(t), d, px, "signal", cost))
 
-            for t, cap in ordres["entrees"].items():
+            # servir dans l'ordre du score : pas de biais alphabétique si le cash manque
+            for t, cap in sorted(ordres["entrees"].items(),
+                                 key=lambda kv: -kv[1]):
                 px, a = op.loc[d, t], atr.loc[dv, t]
                 if t in pos or np.isnan(px) or np.isnan(a) or a <= 0:
                     continue
@@ -303,9 +334,9 @@ class Portefeuille:
                 if np.isnan(low):
                     continue
                 if low <= s["stop"]:
-                    px = min(op.loc[d, t], s["stop"])      # gap : on subit l'ouverture
+                    px = min(op.loc[d, t], s["stop"])   # gap : on subit l'ouverture
                     cash += s["qty"] * px * (1 - cost)
-                    trades.append(_trade(t, pos.pop(t), d, px, "stop"))
+                    trades.append(_trade(t, pos.pop(t), d, px, "stop", cost))
                     continue
                 # chandelier : trailing depuis le plus haut atteint, jamais en arrière
                 s["plus_haut"] = max(s["plus_haut"], high)
@@ -332,30 +363,58 @@ class Portefeuille:
                 equity = cash + sum(pos[t]["qty"] * cl.loc[d, t] for t in pos
                                     if not np.isnan(cl.loc[d, t]))
                 dispo = cash + libere
-
                 n_libres = p.n_long - len(restants)
+
                 if n_libres > 0 and dispo > equity * p.poids_min:
-                    cand = rg[(rg >= p.rang_entree) & el].drop(labels=restants, errors="ignore")
-                    cand = cand.nlargest(n_libres).index
+                    cand = (rg[(rg >= p.rang_entree) & el]
+                            .drop(labels=restants, errors="ignore")
+                            .nlargest(n_libres).index)
                     if len(cand):
-                        w = self._poids_cibles(list(cand), d, equity)
+                        w = self._poids_cibles(list(cand), d)
                         besoin = (w * equity).sum()
                         k = min(1.0, dispo / besoin) if besoin > 0 else 0.0
                         for t, wi in w.items():
                             ordres["entrees"][t] = wi * equity * k
 
-            courbe[i] = cash + sum(pos[t]["qty"] * cl.loc[d, t] for t in pos
-                                   if not np.isnan(cl.loc[d, t]))
+            val_pos = sum(pos[t]["qty"] * cl.loc[d, t] for t in pos
+                          if not np.isnan(cl.loc[d, t]))
+            courbe[i] = cash + val_pos
+            expo[i] = val_pos / courbe[i] if courbe[i] > 0 else 0.0
 
         eq = pd.Series(courbe, index=idx).ffill().fillna(capital)
-        return {"equity": eq, "trades": pd.DataFrame(trades), "params": p}
+
+        # positions encore ouvertes a la derniere date, valorisees au dernier cours
+        d_fin = idx[-1]
+        ouvertes = []
+        for t, s in pos.items():
+            px = cl.loc[d_fin, t]
+            if np.isnan(px):
+                continue
+            frais_in = s["qty"] * s["px_in"] * cost
+            ouvertes.append({
+                "ticker": t, "entree": s["date_in"], "px_entree": s["px_in"],
+                "px_actuel": px, "qty": s["qty"],
+                "valeur": s["qty"] * px, "stop": s["stop"],
+                "frais": frais_in,
+                "pnl_latent": (px - s["px_in"]) * s["qty"] - frais_in,
+                "ret_%": ((px - s["px_in"]) * s["qty"] - frais_in) / (s["px_in"] * s["qty"]) * 100,
+                "jours": s["held"],
+            })
+
+        return {"equity": eq, "trades": pd.DataFrame(trades),
+                "positions": pd.DataFrame(ouvertes),
+                "cash": cash, "exposition": pd.Series(expo, index=idx), "params": p}
 
 
-def _trade(t, s, d_out, px_out, motif):
+def _trade(t, s, d_out, px_out, motif, cost):
+    """PnL NET des coûts (aller + retour). La version précédente le calculait brut,
+    ce qui surestimait profit_factor et gain_moyen."""
+    frais = s["qty"] * (s["px_in"] + px_out) * cost
+    pnl = (px_out - s["px_in"]) * s["qty"] - frais
     return {"ticker": t, "entree": s["date_in"], "sortie": d_out,
             "px_entree": s["px_in"], "px_sortie": px_out, "qty": s["qty"],
-            "pnl": (px_out - s["px_in"]) * s["qty"],
-            "ret_%": (px_out / s["px_in"] - 1) * 100,
+            "frais": frais, "pnl": pnl,
+            "ret_%": pnl / (s["px_in"] * s["qty"]) * 100,
             "jours": s["held"], "motif": motif}
 
 
@@ -363,7 +422,15 @@ def _trade(t, s, d_out, px_out, motif):
 # Métriques
 # ============================================================================
 
-def stats(res: dict, freq: int = 252) -> pd.Series:
+def stats(res: dict, close: pd.DataFrame | None = None, freq: int = 252) -> pd.Series:
+    """close : panel de clôtures. Si fourni, ajoute le benchmark buy & hold.
+
+    POURQUOI LE BENCHMARK EST INDISPENSABLE
+    Sur une marche aléatoire en log, le PRIX a une dérive positive (inégalité de
+    Jensen). Une stratégie long-only capture cette dérive SANS aucun edge. Comparer
+    à zéro ne prouve donc rien : le bon contrôle négatif est le buy & hold
+    équipondéré, ajusté de l'exposition moyenne.
+    """
     eq, tr = res["equity"], res["trades"]
     r = eq.pct_change().dropna()
     ans = len(eq) / freq
@@ -375,11 +442,25 @@ def stats(res: dict, freq: int = 252) -> pd.Series:
            "vol_%": vol * 100, "sharpe": cagr / vol if vol > 0 else np.nan,
            "max_dd_%": dd * 100, "calmar": cagr / abs(dd) if dd < 0 else np.nan,
            "nb_trades": len(tr)}
+
+    if "exposition" in res:
+        out["expo_moy_%"] = res["exposition"].mean() * 100
+
     if len(tr):
         g, pr = tr[tr.pnl > 0], tr[tr.pnl <= 0]
         out |= {"win_%": len(g) / len(tr) * 100,
                 "gain_moy_%": g["ret_%"].mean() if len(g) else np.nan,
                 "perte_moy_%": pr["ret_%"].mean() if len(pr) else np.nan,
-                "profit_factor": g.pnl.sum() / abs(pr.pnl.sum()) if pr.pnl.sum() else np.inf,
-                "duree_moy_j": tr.jours.mean()}
+                "profit_factor": g.pnl.sum() / abs(pr.pnl.sum()) if len(pr) and pr.pnl.sum() else np.inf,
+                "duree_moy_j": tr.jours.mean(),
+                "frais_tot": tr.frais.sum(),
+                "frais_%_an": tr.frais.sum() / eq.iloc[0] / ans * 100}
+
+    if close is not None:
+        bh = close.pct_change().mean(axis=1).reindex(eq.index).fillna(0).add(1).cumprod()
+        bh_cagr = bh.iloc[-1] ** (1 / ans) - 1 if ans > 0 else np.nan
+        expo = res.get("exposition", pd.Series(1.0, index=eq.index)).mean()
+        out |= {"bh_cagr_%": bh_cagr * 100,
+                "alpha_vs_bh_%": (cagr - bh_cagr * expo) * 100}
+
     return pd.Series(out)
