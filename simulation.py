@@ -286,3 +286,80 @@ def test_causalite(prix: dict, Indicateurs, p: ParamsPF, secteurs,
     b = book_tronque[cols].sort_values("ticker").reset_index(drop=True)
     return a.ticker.equals(b.ticker) and np.allclose(
         a[["poids_%", "stop"]], b[["poids_%", "stop"]], atol=1e-6)
+
+
+# ============================================================================
+# 5. Simulation avec un couple de PANIERS (sortie du protocole)
+# ============================================================================
+# Le chemin ci-dessus (score pondéré par IC) et celui-ci (paniers à conditions)
+# répondent à la même question mais partent d'objets différents :
+#     simuler()        <- poids calibrés par IC, recalibrés en walk-forward
+#     simuler_panier() <- couple (Panier entrée, Panier sortie) issu de fusion.py
+# C'est le second qu'il faut utiliser après avoir fait tourner le protocole.
+
+def simuler_panier(prix: dict, date_debut, Indicateurs,
+                   panier_entree, panier_sortie,
+                   p_bs=None, generateur=None, capital: float = 10_000.0,
+                   verbose: bool = True) -> Simulation:
+    """Rejoue un couple de paniers jour par jour, de `date_debut` à la fin des données.
+
+    Mêmes règles que le bootstrap : stop-loss en ATR, décision sur la clôture de t,
+    exécution à l'ouverture de t+1, allocation inverse-volatilité. Les positions
+    encore ouvertes à la fin sont valorisées au dernier cours SANS ordre de vente.
+
+    prix : historique COMPLET. L'antériorité à `date_debut` sert uniquement à
+           amorcer les indicateurs (mom_12_1 exige 252 séances), elle n'est
+           jamais tradée.
+    """
+    from bootstrap import ParamsBS, simuler_fenetre
+    from portefeuille import ParamsPF, construire_panels
+    from features import features_completes
+
+    p_bs = p_bs or ParamsBS(capital=capital)
+    p_bs.capital = capital
+    gen = generateur or features_completes
+
+    if verbose:
+        print("Construction des panels…")
+    panels = construire_panels(prix, Indicateurs,
+                               ParamsPF(min_titres=p_bs.min_titres), generateur=gen)
+    close = panels["close"]
+
+    d0 = pd.Timestamp(date_debut)
+    idx = close.index
+    if d0 < idx[0]:
+        d0 = idx[0]
+    if not (idx >= d0).any():
+        raise ValueError(f"Aucune donnée après {d0.date()}")
+    d0 = idx[idx >= d0][0]
+    d1 = idx[-1]
+
+    if verbose:
+        print(f"Scores : {panier_entree.nom} / {panier_sortie.nom}")
+    sc_in = panier_entree.calculer(panels, p_bs.min_titres, appliquer_masque=True)
+    sc_out = panier_sortie.calculer(panels, p_bs.min_titres, appliquer_masque=False)
+
+    couv = panier_entree.couverture(panels, p_bs.min_titres).loc[d0:d1]
+    if verbose:
+        print(f"Couverture des barrières dures : moyenne {couv.mean():.1f}, "
+              f"médiane {couv.median():.0f}, minimum {couv.min():.0f}")
+        if couv.mean() < p_bs.couverture_min:
+            print("  ATTENTION : couverture sous le plancher — desserrer les "
+                  "conditions dures de paniers.py")
+        print(f"Simulation {d0.date()} → {d1.date()} "
+              f"({len(close.loc[d0:d1])} séances)…")
+
+    r = simuler_fenetre(sc_in, sc_out, panels, d0, d1, p_bs, journal=True)
+    if r is None:
+        raise ValueError("fenêtre trop courte")
+
+    bench = close.loc[d0:d1].pct_change().fillna(0).mean(axis=1).add(1).cumprod()
+
+    return Simulation(
+        equity=r["equity_curve"], trades=r["trades"], positions=r["positions"],
+        cash=r["cash"], capital_initial=capital,
+        date_debut=d0, date_fin=d1,
+        poids_utilises={d0.date(): {f: w for f, (_, _, _, w)
+                                    in panier_entree.specs_score().items()}},
+        benchmark=bench,
+    )
