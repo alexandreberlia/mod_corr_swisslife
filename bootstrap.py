@@ -105,7 +105,7 @@ def fenetres_disjointes(index: pd.DatetimeIndex, h: int, debut=None, fin=None,
 # ============================================================================
 
 def simuler_fenetre(sc_in: pd.DataFrame, sc_out: pd.DataFrame, panels: dict,
-                    d0, d1, p: ParamsBS) -> dict:
+                    d0, d1, p: ParamsBS, journal: bool = False) -> dict:
     """Une fenêtre, jour par jour. Renvoie le P&L en % du capital.
 
     Ordre à chaque barre :
@@ -127,6 +127,7 @@ def simuler_fenetre(sc_in: pd.DataFrame, sc_out: pd.DataFrame, panels: dict,
     n_trades = 0
     ordres = {"out": [], "in": {}}
     couv = []
+    trades, courbe = [], np.full(len(idx), np.nan)
 
     for i, d in enumerate(idx):
         if i == 0:
@@ -140,8 +141,10 @@ def simuler_fenetre(sc_in: pd.DataFrame, sc_out: pd.DataFrame, panels: dict,
                 f = pos[t]["qty"] * px * cost
                 cash += pos[t]["qty"] * px - f
                 frais_tot += f
-                pos.pop(t)
+                s = pos.pop(t)
                 n_trades += 1
+                if journal:
+                    trades.append(_journal_trade(t, s, d, px, "signal", cost))
 
         for t, cap in sorted(ordres["in"].items(), key=lambda kv: -kv[1]):
             px, a = op.loc[d, t], atr.loc[dv, t]
@@ -155,12 +158,14 @@ def simuler_fenetre(sc_in: pd.DataFrame, sc_out: pd.DataFrame, panels: dict,
             cash -= qty * px + f
             frais_tot += f
             pos[t] = {"qty": qty, "px_in": px, "stop": px - p.stop_atr * a,
-                      "plus_haut": px, "atr_in": a}
+                      "plus_haut": px, "atr_in": a, "date_in": d,
+                      "frais_in": f, "held": 0}
         ordres = {"out": [], "in": {}}
 
         # ---- 2. stop-loss en séance (prioritaire) ----
         for t in list(pos):
             s = pos[t]
+            s["held"] = s.get("held", 0) + 1
             low = lo.loc[d, t]
             if np.isnan(low):
                 continue
@@ -171,12 +176,19 @@ def simuler_fenetre(sc_in: pd.DataFrame, sc_out: pd.DataFrame, panels: dict,
                 frais_tot += f
                 pos.pop(t)
                 n_trades += 1
+                if journal:
+                    trades.append(_journal_trade(t, s, d, px, "stop", cost))
                 continue
             if p.trail_atr:
                 s["plus_haut"] = max(s["plus_haut"], hi.loc[d, t])
                 a = atr.loc[d, t]
                 if not np.isnan(a):
                     s["stop"] = max(s["stop"], s["plus_haut"] - p.trail_atr * a)
+
+        if journal:
+            vp = sum(s["qty"] * cl.loc[d, t] for t, s in pos.items()
+                     if not np.isnan(cl.loc[d, t]))
+            courbe[i] = cash + vp
 
         # ---- pas de décision le dernier jour : on valorise et on s'arrête ----
         if i == len(idx) - 1 or (i % p.freq_decision):
@@ -235,7 +247,31 @@ def simuler_fenetre(sc_in: pd.DataFrame, sc_out: pd.DataFrame, panels: dict,
                   if not np.isnan(cl.loc[d_fin, t]))
     equity = cash + val_pos
 
+    sortie_journal = {}
+    if journal:
+        courbe[0] = p.capital
+        courbe[-1] = equity
+        ouvertes = []
+        for t, s in pos.items():
+            px = cl.loc[d_fin, t]
+            if np.isnan(px):
+                continue
+            fi = s.get("frais_in", 0.0)
+            ouvertes.append({
+                "ticker": t, "entree": s.get("date_in"), "px_entree": s["px_in"],
+                "px_actuel": px, "qty": s["qty"], "valeur": s["qty"] * px,
+                "stop": s["stop"], "frais": fi,
+                "pnl_latent": (px - s["px_in"]) * s["qty"] - fi,
+                "ret_%": ((px - s["px_in"]) * s["qty"] - fi) / (s["px_in"] * s["qty"]) * 100,
+                "jours": s.get("held", 0)})
+        sortie_journal = {
+            "equity_curve": pd.Series(courbe, index=idx).ffill().fillna(p.capital),
+            "trades": pd.DataFrame(trades),
+            "positions": pd.DataFrame(ouvertes),
+            "cash": cash}
+
     return {
+        **sortie_journal,
         "debut": idx[0], "fin": d_fin,
         "pnl_pct": (equity / p.capital - 1) * 100,
         "equity": equity,
@@ -246,6 +282,17 @@ def simuler_fenetre(sc_in: pd.DataFrame, sc_out: pd.DataFrame, panels: dict,
         "couverture_moy": float(np.mean(couv)) if couv else 0.0,
         "expo_finale": val_pos / equity if equity > 0 else 0.0,
     }
+
+
+def _journal_trade(t, s, d_out, px_out, motif, cost) -> dict:
+    """Ligne de journal. PnL NET des frais aller ET retour."""
+    frais = s.get("frais_in", 0.0) + s["qty"] * px_out * cost
+    pnl = (px_out - s["px_in"]) * s["qty"] - frais
+    return {"ticker": t, "entree": s.get("date_in"), "sortie": d_out,
+            "px_entree": s["px_in"], "px_sortie": px_out, "qty": s["qty"],
+            "frais": frais, "pnl": pnl,
+            "ret_%": pnl / (s["px_in"] * s["qty"]) * 100,
+            "jours": s.get("held", 0), "motif": motif}
 
 
 def _poids(tickers, date, panels, p: ParamsBS) -> pd.Series:
@@ -281,7 +328,8 @@ def bootstrap_couple(p_in, p_out, panels: dict, h: int, fenetres: list,
     sc_out = p_out.calculer(panels, p.min_titres, appliquer_masque=False)
 
     res = [r for d0, d1 in fenetres
-           if (r := simuler_fenetre(sc_in, sc_out, panels, d0, d1, p)) is not None]
+           if (r := simuler_fenetre(sc_in, sc_out, panels, d0, d1, p,
+                                    journal=False)) is not None]
     if not res:
         return None
 
