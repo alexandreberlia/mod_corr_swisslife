@@ -587,3 +587,78 @@ Non, elle garde deux usages.
 **Fabriquer un banc d'essai.** Toute méthode prétendant prévoir l'état du cycle doit battre cette référence. Elle sert de plancher, pas d'outil.
 
 Ce qu'il ne faut pas faire : publier « le score sera à 47 dans un an » comme un résultat. L'intervalle à 80 % de cette prévision couvre [18 ; 73], soit plus de la moitié de l'échelle.
+
+# Le score et le S&P 500 : pourquoi ça ne marche pas
+
+Question testée : le score d'activité peut-il servir de signal sur les actions ? Par exemple *« score > 80 → perspective haussière de x % sur 3 trimestres »*.
+
+**Réponse : non.** Trois mesures, et une nuance qui sauve une lecture descriptive.
+
+---
+
+## 1. La relation existe, mais dans l'autre sens
+
+Rendement du S&P à 3 trimestres, par quartile de score (n = 212) :
+
+| quartile de score | rendement moyen | médiane |
+|---|---|---|
+| **Q1 (score bas)** | **+10,3 %** | +11,5 % |
+| Q2 | +8,0 % | +9,3 % |
+| Q3 | +5,2 % | +5,7 % |
+| **Q4 (score haut)** | **+4,2 %** | +5,4 % |
+
+La relation est monotone et **inverse de l'intuition** : un score élevé n'annonce pas une hausse, mais des rendements ultérieurs plus faibles. Le motif tient à tous les horizons (+3,4 % contre +1,1 % à 1 trimestre ; +12,9 % contre +4,8 % à 4).
+
+Ce n'est pas une anomalie, c'est le résultat standard sur les **primes de risque contracycliques**
+
+---
+
+## 2. L'écart n'est pas significatif
+
+Écart Q1 − Q4 = +6,0 points. **p = 0,180** par rotation circulaire — méthode qui casse le lien tout en préservant l'autocorrélation.
+
+Les *t* de 2,3 à 4,3 qu'un test naïf produirait sont trompeurs : les rendements à 3 trimestres **se chevauchent**, donc les 212 observations ne portent pas 212 informations indépendantes.
+
+Deuxième indice dans le même sens : le bloc coïncident fait aussi bien que le bloc avancé (+7,1 contre +6,1 points d'écart). Ce n'est donc pas de l'anticipation, mais une association contemporaine avec le niveau de prime.
+
+---
+
+## 3. Optimiser les poids sur le S&P aggrave les choses
+
+Le test décisif. Pondération des trois blocs optimisée sur 1971-1997, appliquée telle quelle à 1998-2023 :
+
+| | in-sample | **hors échantillon** |
+|---|---|---|
+| poids optimisés sur le S&P | −0,295 | **−0,144** |
+| score par défaut, non optimisé | −0,250 | **−0,172** |
+
+L'optimisation perd la moitié de son avantage, et **fait moins bien que le score non optimisé**. Les poids appris captent le bruit de la première période, pas une relation stable. Surajustement caractérisé.
+
+---
+
+## Pourquoi c'était prévisible
+
+Le S&P est le **seul objet négociable** du panel. Toute prévisibilité identifiée serait immédiatement exploitée et arbitrée : si l'on savait qu'un score bas annonce +10 % dans neuf mois, les prix intégreraient cette information aujourd'hui et l'écart disparaîtrait. C'est Samuelson-Fama.
+
+Le chômage, lui, n'est pas négociable. Personne ne peut arbitrer sa prévisibilité, donc elle persiste — d'où les 8 variables au FDR et les R² de 0,61 à 0,84 obtenus sur cette cible.
+
+Le résultat converge avec le classement d'indicateurs mené séparément : sur 19 variables testées contre le rendement du S&P, **zéro** ne passait le FDR. Tous les coefficients significatifs étaient négatifs (ISM à −5,98 avec 4 trimestres d'avance, Chicago PMI à −5,03) — le même motif de prime contracyclique, et la même absence de significativité après correction.
+
+---
+
+## La piste inverse
+
+Plutôt que de faire prédire le S&P par le score, **intégrer le S&P au score**.
+
+Son rendement sur 12 mois est stationnaire, couvre 1949-2026 dans le fichier `spx500.csv` — soit bien plus que le panel Bloomberg — et les marchés actions figurent dans la plupart des indices avancés composites, y compris le LEI du Conference Board.
+
+```python
+mon_bloc_avance = {
+    "NAPMPMI Index": (+1, 2.5, None),
+    "spx_rdt_12m":   (+1, 2.0, None),   # rendement, jamais le niveau
+    "OUTFGAF Index": (+1, 1.5, None),
+}
+S = build_score_3blocs(panel, avance=mon_bloc_avance)
+```
+
+Le S&P est un bon **indicateur avancé** de l'économie réelle — il regarde en avant par nature. Il est en revanche une mauvaise **cible**, pour la raison qui fait précisément sa qualité d'indicateur : il intègre déjà toute l'information disponible.
