@@ -2,8 +2,8 @@
 
 Deux outils indépendants, construits sur le même panel de séries trimestrielles américaines.
 
-1. **Modèle d'indicateurs avancés** — classer les variables selon leur capacité à anticiper une cible (PIB, chômage…), et déterminer avec quelle avance.
-2. **Scoring macro** — résumer l'état du cycle en un score 0-100, dans le prolongement du découpage en quatre phases.
+1. **Modèle d'indicateurs avancés** : classer les variables selon leur capacité à anticiper une cible (PIB, chômage…), et déterminer avec quelle avance.
+2. **Scoring macro** : résumer l'état du cycle en un score 0-100, dans le prolongement du découpage en quatre phases.
 
 ---
 
@@ -133,7 +133,7 @@ Résultats sur le panel, cible par cible :
 
 Le chômage est de loin la cible la plus prévisible. La consommation ne l'est pratiquement pas — ce qui est attendu : sous lissage intertemporel, la consommation suit approximativement une marche aléatoire, et sa variation ne devrait pas être prévisible.
 
-Trois motifs récurrents :
+Trois motifs :
 
 - **En décélération**, les indicateurs réels d'activité (LEI, commandes, emploi, permis) anticipent à 1-2 trimestres, avec des ajustements élevés.
 - **En accélération**, presque rien n'anticipe à court terme, mais les enquêtes manufacturières ressortent à 6 trimestres **avec un signe négatif** : une activité très forte aujourd'hui précède une dégradation un an et demi plus tard. Signal de retournement par surchauffe, retrouvé sur trois cibles différentes.
@@ -141,7 +141,7 @@ Trois motifs récurrents :
 
 ## Limites
 
-Corrélation, pas causalité. Relation supposée stable sur toute la période, ce qui est douteux sur 50 ans. Et la datation des phases provient d'un filtre appliqué en plein échantillon : elle utilise donc une information indisponible en temps réel. Acceptable en descriptif, à refaire en récursif pour toute prétention prédictive.
+Corrélation, pas causalité. Relation supposée stable sur toute la période. Et la datation des phases provient d'un filtre appliqué en plein échantillon : elle utilise donc une information indisponible en temps réel.
 
 ---
 
