@@ -315,18 +315,33 @@ def orientation(x: pd.Series, phases: pd.Series, phase_cible: str,
     uniq = np.unique(eps)
     rows = {e: np.where(eps == e)[0] for e in uniq}
 
+    # Firth si disponible, sinon repli sur statsmodels. Sans ce repli, un
+    # firth.py absent du dossier renvoyait nan sur TOUS les coefficients, en
+    # ne laissant que les colonnes n_evenements renseignees — symptome
+    # deroutant, car aucune erreur n'etait levee.
+    _fitf = None
+    if firth:
+        try:
+            from firth import fit_firth as _fitf
+        except ImportError:
+            warnings.warn(
+                "firth.py introuvable : repli sur le probit ordinaire. "
+                "Avec peu d'evenements, il peut diverger par separation — "
+                "placez firth.py dans le meme dossier.")
+
     def _coef(Xa, ya):
         if ya.sum() < 3 or ya.sum() == len(ya):
             return np.nan
-        if firth:
+        if _fitf is not None:
             try:
-                from firth import fit_firth
-                return float(fit_firth(Xa, ya.astype(float))["params"][1])
+                b = float(_fitf(Xa, ya.astype(float))["params"][1])
+                return b if abs(b) < 20 else np.nan
             except Exception:
                 return np.nan
         import statsmodels.api as sm
         try:
-            return float(sm.Probit(ya, Xa).fit(disp=0, maxiter=200).params[1])
+            b = float(sm.Probit(ya, Xa).fit(disp=0, maxiter=200).params[1])
+            return b if abs(b) < 20 else np.nan   # separation : non exploitable
         except Exception:
             return np.nan
 
