@@ -250,3 +250,151 @@ def tableau_par_phase(phases: pd.Series, panel: pd.DataFrame,
         R.insert(0, "phase_courante", ph)
         out.append(R.head(top))
     return pd.concat(out, ignore_index=True) if out else pd.DataFrame()
+
+
+# ---------------------------------------------------------------------------
+# Orientation : vers QUELLE sortie une variable pousse-t-elle ?
+# ---------------------------------------------------------------------------
+
+def orientation(x: pd.Series, phases: pd.Series, phase_cible: str,
+                horizon: int = 4, n_boot: int = 400, seed: int = 0,
+                firth: bool = True) -> pd.DataFrame | None:
+    """Vers quelle destination une variable oriente-t-elle la sortie ?
+
+    Pour chaque destination d, on estime separement
+
+        P(sortie vers d dans les k trimestres | en phase P en t) = Phi(a_d + b_d x_t)
+
+    contre TOUT le reste — rester dans la phase, ou en sortir ailleurs. Le
+    signe de b_d dit si un x eleve rapproche (positif) ou eloigne (negatif) la
+    sortie vers d.
+
+    Pourquoi une equation par destination plutot qu'un multinomial : avec 4 a 7
+    sorties par destination, le multinomial estime trop de parametres a la fois
+    et diverge. Des probits separes restent estimables, au prix de perdre la
+    contrainte que les probabilites somment a 1 — sans consequence ici puisque
+    seul le SENS nous interesse.
+
+    La statistique utile n'est pas b_d isole mais l'ECART entre deux
+    destinations : « x pousse-t-il vers le Decrochage PLUTOT que vers
+    l'Explosion ». C'est ce que la colonne `ecart` mesure, avec sa p-value
+    bootstrap par episode.
+
+    Firth est active par defaut : avec si peu d'evenements, le maximum de
+    vraisemblance ordinaire diverge souvent par separation.
+    """
+    ep = _episodes(phases)
+    dernier = ep.max()
+    lignes, meta = [], {}
+    for e in sorted(ep.unique()):
+        idx = phases.index[ep == e]
+        if phases[idx[0]] != phase_cible:
+            continue
+        censure = e == dernier
+        dest = None if censure else phases[phases.index[ep == e + 1][0]]
+        fin = idx[-1]
+        for t in idx:
+            reste = (fin - t).n
+            if censure and reste < horizon:
+                continue
+            lignes.append(dict(date=t, episode=int(e),
+                               sort=int(reste < horizon),
+                               dest=dest if reste < horizon else None))
+    d = pd.DataFrame(lignes).set_index("date")
+    if len(d) < 30:
+        return None
+    d["x"] = x.reindex(d.index)
+    d = d.dropna(subset=["x"])
+    dests = sorted(v for v in d["dest"].dropna().unique())
+    if len(dests) < 2:
+        return None
+
+    xv = d["x"].to_numpy(float)
+    X = np.column_stack([np.ones(len(d)), xv])
+    eps = d["episode"].to_numpy()
+    uniq = np.unique(eps)
+    rows = {e: np.where(eps == e)[0] for e in uniq}
+
+    def _coef(Xa, ya):
+        if ya.sum() < 3 or ya.sum() == len(ya):
+            return np.nan
+        if firth:
+            try:
+                from firth import fit_firth
+                return float(fit_firth(Xa, ya.astype(float))["params"][1])
+            except Exception:
+                return np.nan
+        import statsmodels.api as sm
+        try:
+            return float(sm.Probit(ya, Xa).fit(disp=0, maxiter=200).params[1])
+        except Exception:
+            return np.nan
+
+    obs = {}
+    for dst in dests:
+        y = ((d["sort"] == 1) & (d["dest"] == dst)).astype(int).to_numpy()
+        obs[dst] = dict(coef=_coef(X, y), n_ev=int(y.sum()))
+
+    # bootstrap par episode : loi des coefficients et de leurs ecarts
+    rng = np.random.default_rng(seed)
+    tir = {dst: [] for dst in dests}
+    for _ in range(n_boot):
+        pick = rng.choice(uniq, len(uniq), replace=True)
+        sel = np.concatenate([rows[e] for e in pick])
+        if len(sel) < 30:
+            continue
+        Xs, ds = X[sel], d.iloc[sel]
+        for dst in dests:
+            y = ((ds["sort"] == 1) & (ds["dest"] == dst)).astype(int).to_numpy()
+            c = _coef(Xs, y)
+            if np.isfinite(c):
+                tir[dst].append(c)
+
+    out = []
+    for dst in dests:
+        c = obs[dst]["coef"]
+        v = np.array(tir[dst])
+        out.append(dict(destination=dst, n_evenements=obs[dst]["n_ev"],
+                        coef=round(c, 4) if np.isfinite(c) else np.nan,
+                        sens=("rapproche" if np.isfinite(c) and c > 0
+                              else "eloigne" if np.isfinite(c) else "-"),
+                        p_signe=(round(float(np.mean(np.sign(v) != np.sign(c))), 3)
+                                 if len(v) > 20 and np.isfinite(c) else np.nan),
+                        ic_bas=round(float(np.percentile(v, 5)), 4) if len(v) > 20 else np.nan,
+                        ic_haut=round(float(np.percentile(v, 95)), 4) if len(v) > 20 else np.nan))
+    R = pd.DataFrame(out).sort_values("coef", ascending=False)
+
+    # ecart entre les deux destinations les plus documentees
+    princ = R.nlargest(2, "n_evenements")["destination"].tolist()
+    if len(princ) == 2:
+        a, b = princ
+        va, vb = np.array(tir[a]), np.array(tir[b])
+        n = min(len(va), len(vb))
+        if n > 20:
+            dif = va[:n] - vb[:n]
+            obs_dif = obs[a]["coef"] - obs[b]["coef"]
+            R.attrs["ecart"] = dict(
+                entre=f"{a} vs {b}", valeur=round(float(obs_dif), 4),
+                p=round(float(np.mean(np.sign(dif) != np.sign(obs_dif))), 3),
+                lecture=(f"x eleve oriente plutot vers {a}" if obs_dif > 0
+                         else f"x eleve oriente plutot vers {b}"))
+    R.attrs["phase"] = phase_cible
+    R.attrs["horizon"] = horizon
+    R.attrs["variable"] = x.name
+    return R
+
+
+def resume_orientation(R: pd.DataFrame) -> str:
+    """Formule le resultat en clair."""
+    if R is None or len(R) == 0:
+        return "non estimable"
+    L = [f"{R.attrs.get('variable', 'x')} en {R.attrs['phase']}, "
+         f"horizon {R.attrs['horizon']} trimestres", ""]
+    L.append(R.to_string(index=False))
+    e = R.attrs.get("ecart")
+    if e:
+        L += ["", f"ecart {e['entre']} : {e['valeur']:+.4f} (p={e['p']:.3f})",
+              f"-> {e['lecture']}"]
+    L += ["", "p_signe : part des reechantillonnages ou le signe s'inverse.",
+          "Au-dessus de 0,20, le sens n'est pas etabli."]
+    return "\n".join(L)
