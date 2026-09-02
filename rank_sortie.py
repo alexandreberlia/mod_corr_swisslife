@@ -398,3 +398,69 @@ def resume_orientation(R: pd.DataFrame) -> str:
     L += ["", "p_signe : part des reechantillonnages ou le signe s'inverse.",
           "Au-dessus de 0,20, le sens n'est pas etabli."]
     return "\n".join(L)
+
+
+def tableau_orientation(phases: pd.Series, panel: pd.DataFrame,
+                        phase_cible: str, horizon: int = 6,
+                        n_boot: int = 250, min_obs: int = 80,
+                        seuil_signe: float = 0.20) -> pd.DataFrame:
+    """Tableau recapitulatif : chaque variable oriente vers quelle sortie ?
+
+    Applique `orientation` a toutes les colonnes du panel et met les
+    coefficients en regard, destination par destination.
+
+    Parameters
+    ----------
+    phase_cible : la phase ou l'on se trouve
+    horizon : fenetre de sortie, en trimestres
+    seuil_signe : au-dela, le sens est juge non etabli (colonne `etabli`)
+
+    Colonnes de sortie
+    ------------------
+        vers_<destination>   coefficient probit pour cette destination
+        p_<destination>      part des reechantillonnages ou le signe s'inverse
+        ecart, p_ecart       difference entre les deux destinations les plus
+                             documentees, et sa p-value bootstrap
+        lecture              formulation en clair
+        etabli               True si les deux destinations principales ont un
+                             signe stable ET l'ecart aussi
+
+    Lecture : `etabli` d'abord, puis `ecart`, puis les coefficients. Une
+    variable dont le signe s'inverse dans un tiers des reechantillonnages
+    n'oriente rien, quelle que soit la taille de son coefficient.
+    """
+    lignes = []
+    for nom in panel.columns:
+        s = panel[nom]
+        if s.notna().sum() < min_obs:
+            continue
+        try:
+            R = orientation(s.rename(nom), phases, phase_cible, horizon, n_boot)
+        except Exception:
+            R = None
+        if R is None or len(R) == 0:
+            continue
+        g = R.set_index("destination")
+        r = {"variable": nom}
+        for dst in g.index:
+            r[f"vers_{dst}"] = g.loc[dst, "coef"]
+            r[f"p_{dst}"] = g.loc[dst, "p_signe"]
+            r[f"n_{dst}"] = int(g.loc[dst, "n_evenements"])
+        e = R.attrs.get("ecart", {})
+        r["ecart"] = e.get("valeur", np.nan)
+        r["p_ecart"] = e.get("p", np.nan)
+        r["lecture"] = e.get("lecture", "-").replace(
+            "x eleve oriente plutot vers ", "eleve -> ")
+        princ = list(g.nlargest(2, "n_evenements").index)
+        ps = [g.loc[d, "p_signe"] for d in princ]
+        r["etabli"] = bool(np.all(np.array(ps, float) <= seuil_signe)
+                           and r["p_ecart"] is not np.nan
+                           and r["p_ecart"] <= seuil_signe)
+        lignes.append(r)
+    if not lignes:
+        return pd.DataFrame()
+    out = pd.DataFrame(lignes)
+    out.attrs["phase"] = phase_cible
+    out.attrs["horizon"] = horizon
+    return out.sort_values(["etabli", "p_ecart"],
+                           ascending=[False, True]).reset_index(drop=True)
