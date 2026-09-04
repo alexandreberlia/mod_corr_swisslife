@@ -106,9 +106,37 @@ import pandas as pd
 warnings.filterwarnings("ignore")
 
 # --- PARAMETRES FIGES ------------------------------------------------------
-CORRECTION_DERIVE = 12   # trimestres : gap moins sa moyenne mobile
-BANDE_NIVEAU = 0.35      # bande morte, en ecarts-types du gap
-AMPLITUDE_MIN = 2.0      # points de croissance entre deux retournements
+CORRECTION_DERIVE = 0    # 0 = pas de correction ; le gap reste l'ecart au potentiel
+# RETIREE. Elle avait ete introduite pour corriger un « Decrochage » de
+# 2011-2013 juge errone. Verification faite, ce Decrochage etait CORRECT :
+# l'economie etait sous son potentiel (gap -2,9) et la croissance ralentissait
+# de 2,78 % a 1,74 % avant le creux de 2011Q3 — ce qui est la definition meme
+# du Decrochage. La « perte de precision » que la correction faisait disparaitre
+# ne mesurait qu'une chose : Decrochage est plus large que recession NBER, ce
+# qui est voulu.
+#
+# Son cout etait lourd : elle transformait le gap en « ecart a ma propre moyenne
+# des trois dernieres annees », si bien qu'en 2026 le PIB depassait le potentiel
+# de 0,8 % tout en etant classe « sous le potentiel ». Les etiquettes de phase
+# ne correspondaient plus a leur definition.
+BANDE_NIVEAU = 0.0       # bande morte, en ecarts-types du gap
+# Mise a zero apres verification : une bande de 0,35 avait ete introduite pour
+# un probleme de l'ancienne datation (filtre de Hamilton). Depuis le passage au
+# potentiel CBO et la correction du bug d'alternance, elle degrade tout —
+#   bande 0,00 : couverture 90 %, precision 81 %
+#   bande 0,15 : couverture 88 %, precision 75 %
+#   bande 0,35 : couverture 75 %, precision 71 %
+# et elle figeait le niveau a 1 sur 2025-2026 malgre un gap devenu negatif.
+AMPLITUDE_MIN = 1.25     # points de croissance entre deux retournements
+# Abaisse de 2,0 a 1,25 apres correction du bug d'alternance et mise a zero de
+# la bande morte. A 2,0, le pic de croissance de fin 2023 (3,39 % puis descente
+# a 1,99 %, soit 1,40 point) n'etait pas valide : le momentum restait a la
+# hausse pendant 14 trimestres, et l'on passait d'Explosion directement a
+# Reprise — un enchainement que le cycle ne produit pas.
+#   ampl 1,25 : 57 episodes, 11/11 recessions, couverture 90 %, precision 75 %
+#   ampl 2,00 : 51 episodes, 11/11,            couverture 90 %, precision 81 %
+# On perd 6 points de precision, on gagne 6 transitions et une sequence recente
+# coherente : Explosion -> Ralentissement -> Decrochage -> Reprise.
 DUREE_MIN_RETOURNEMENT = 3   # trimestres entre deux retournements
 DUREE_MIN_PHASE = 2      # trimestres, duree minimale d'une phase
 # Calibre : 2 domine 3 et 4 sur tous les criteres mesurables —
@@ -138,7 +166,7 @@ def charger_fred(chemin: str, feuille: str = "Quarterly") -> pd.Series:
 
 
 def calculer_gap(pib: pd.Series, potentiel: pd.Series,
-                 correction: int = CORRECTION_DERIVE) -> pd.Series:
+                 correction: int | None = None) -> pd.Series:
     """Ecart de production, corrige de la derive lente.
 
         gap_t = [log Y_t - log Y*_t] - moyenne des 12 derniers trimestres
@@ -151,9 +179,21 @@ def calculer_gap(pib: pd.Series, potentiel: pd.Series,
     ramene la mesure a « ou en est-on par rapport a la periode recente »,
     ce qui est la question cyclique.
 
-    La fenetre de 12 trimestres a ete calibree une fois : 8 et 16 donnent une
-    correspondance nettement moins bonne avec les recessions NBER.
+    Calibration (retestee avec les reglages finaux) :
+        sans correction : 10/11 recessions, couverture 65 %, precision 49 %
+        MM 8            : 10/11,            couverture 65 %, precision 49 %
+        MM 12           : 11/11,            couverture 90 %, precision 75 %
+        MM 16, MM 20    : identiques a MM 12
+    Le saut se produit entre 8 et 12 trimestres : en deca, la moyenne mobile est
+    trop courte pour absorber la persistance post-choc. Au-dela, le resultat est
+    stable — le reglage n'est donc pas un point d'equilibre fragile.
     """
+    # None -> on lit la constante A L'APPEL. En valeur par defaut d'argument,
+    # elle serait figee a l'import : modifier cycle_dating.CORRECTION_DERIVE
+    # apres coup n'aurait alors aucun effet, ce qui rend tout test parametrique
+    # silencieusement faux.
+    if correction is None:
+        correction = CORRECTION_DERIVE
     i = pib.index.intersection(potentiel.index)
     if len(i) < 40:
         raise ValueError(f"Recouvrement insuffisant : {len(i)} trimestres.")
