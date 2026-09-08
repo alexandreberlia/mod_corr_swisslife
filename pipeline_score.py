@@ -93,49 +93,73 @@ BLOC_MOMENTUM = {
 # Construction
 # ---------------------------------------------------------------------------
 
-def construire(panel: pd.DataFrame, spec: dict, ponderation: str = "fixe",
-               couverture_min: float = 0.6) -> pd.DataFrame:
-    """Score 0-100 a partir d'une composition.
+def _appliquer_ponderation(spec: dict, panel: pd.DataFrame, mode: str) -> dict:
+    """Variante de ponderation, appliquee AU SPEC — jamais au calcul."""
+    if mode == "fixe":
+        return dict(spec)
+    if mode == "egale":
+        return {k: (sg, 1.0, tr) for k, (sg, _, tr) in spec.items()}
+    if mode == "vol":
+        out = {}
+        for k, (sg, _, tr) in spec.items():
+            if k not in panel.columns:
+                continue
+            sd = panel[k].std()
+            if sd and sd > 0:
+                out[k] = (sg, 1.0 / sd, tr)
+        return out
+    raise ValueError("ponderation : 'fixe', 'egale' ou 'vol'")
 
-    ponderation : "fixe" (les poids de `spec`), "egale", ou "vol" (inverse de
-    l'ecart-type AVANT standardisation — donne le meme resultat que "egale",
-    voir l'en-tete).
+
+def construire_paire(panel: pd.DataFrame, spec_niveau: dict, spec_momentum: dict,
+                     ponderation: str = "fixe", poids_niveau: float = 0.5,
+                     rolling: int | None = None,
+                     couverture_min: float = 0.6) -> pd.DataFrame:
+    """Les deux scores en un appel, via build_score_poids_fixes.
+
+    C'est LA fonction de production pour l'architecture niveau/momentum a poids
+    imposes : elle renvoie les deux sous-scores, le score global, les
+    couvertures et les contributions. Verifie identique au bit pres a une
+    construction manuelle.
+
+    LIMITE : `build_score_poids_fixes` attend un spec a DEUX champs
+    {nom: (signe, poids)} et ne gere pas les transformations. Si une composante
+    exige un `d4` ou un `rdt4` — inflation, taux directeur — passez par
+    `construire()` ci-dessous, qui s'appuie sur l'agregation a trois champs.
     """
-    from cycle_score import _z, _appliquer_transform, _vers_100
+    from cycle_score import build_score_poids_fixes
 
-    zs, poids = {}, {}
-    for nom, (signe, w, tr) in spec.items():
-        if nom not in panel.columns:
-            warnings.warn(f"absente du panel, ignoree : {nom}")
-            continue
-        s = _appliquer_transform(panel[nom], tr)
-        if s.notna().sum() < 40:
-            warnings.warn(f"moins de 40 observations, ignoree : {nom}")
-            continue
-        zs[nom] = _z(s, signe)
-        if ponderation == "fixe":
-            poids[nom] = w
-        elif ponderation == "egale":
-            poids[nom] = 1.0
-        elif ponderation == "vol":
-            sd = s.std()
-            poids[nom] = 1.0 / sd if sd > 0 else 0.0
-        else:
-            raise ValueError("ponderation : 'fixe', 'egale' ou 'vol'")
-    if not zs:
-        raise ValueError("Aucune composante exploitable.")
+    sn = _appliquer_ponderation(spec_niveau, panel, ponderation)
+    sm = _appliquer_ponderation(spec_momentum, panel, ponderation)
+    for lab, sp in (("niveau", sn), ("momentum", sm)):
+        mauvais = [k for k, v in sp.items() if len(v) == 3 and v[2] is not None]
+        if mauvais:
+            raise ValueError(
+                f"transformations non supportees ici ({lab}) : {mauvais}. "
+                "Utilisez construire() pour ces composantes.")
+    to2 = lambda sp: {k: (v[0], v[1]) for k, v in sp.items()}
+    return build_score_poids_fixes(panel, poids_niveau_spec=to2(sn),
+                                   poids_momentum_spec=to2(sm),
+                                   poids_niveau=poids_niveau, rolling=rolling,
+                                   couverture_min=couverture_min)
 
-    Z = pd.DataFrame(zs)
-    w = pd.Series(poids)
-    w = w / w.sum()
-    dispo = Z.notna().astype(float) * w
-    couv = dispo.sum(axis=1)
-    num = (Z.fillna(0) * w).sum(axis=1)
-    # renormalisation par la couverture : une composante manquante ne doit pas
-    # tirer le score vers zero, les autres se repartagent son poids
-    zc = (num / couv.replace(0, np.nan)).where(couv >= couverture_min)
-    out = pd.DataFrame({"z": zc, "score": _vers_100(zc), "couverture": couv.round(2)})
+
+def construire(panel: pd.DataFrame, spec: dict, ponderation: str = "fixe",
+               rolling: int | None = None,
+               couverture_min: float = 0.6) -> pd.DataFrame:
+    """UN seul bloc, avec support des transformations (d4, rdt4).
+
+    S'appuie sur `_agreger_3champs` de cycle_score. A utiliser quand on teste un
+    bloc isole, ou quand une composante demande une transformation. Sinon,
+    `construire_paire` est plus direct.
+    """
+    from cycle_score import _agreger_3champs, _vers_100
+
+    sp = _appliquer_ponderation(spec, panel, ponderation)
+    comp, w, couv, Z = _agreger_3champs(panel, sp, rolling, couverture_min)
+    out = pd.DataFrame({"z": comp, "score": _vers_100(comp), "couverture": couv})
     out.attrs["poids"] = w.round(3).to_dict()
+    out.attrs["contrib"] = (Z * w).round(4)
     return out
 
 
