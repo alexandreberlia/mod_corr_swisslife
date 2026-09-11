@@ -322,18 +322,28 @@ def _poids(tickers, date, panels, p: ParamsBS) -> pd.Series:
 # ============================================================================
 
 def bootstrap_couple(p_in, p_out, panels: dict, h: int, fenetres: list,
-                     p: ParamsBS) -> dict:
-    """Un couple (entrée, sortie), un horizon, toutes les fenêtres."""
+                     p: ParamsBS, ids_episode: list = None) -> dict:
+    """Un couple (entrée, sortie), un horizon, toutes les fenêtres.
+
+    ids_episode : identifiant de l'épisode de régime dont provient chaque fenêtre.
+    Deux fenêtres du même épisode partagent le même contexte macro : elles ne sont
+    PAS indépendantes. Quand ces ids sont fournis, on calcule aussi un t groupé
+    par épisode, plus honnête (et toujours inférieur) que le t naïf.
+    """
     sc_in = p_in.calculer(panels, p.min_titres, appliquer_masque=True)
     sc_out = p_out.calculer(panels, p.min_titres, appliquer_masque=False)
 
-    res = [r for d0, d1 in fenetres
-           if (r := simuler_fenetre(sc_in, sc_out, panels, d0, d1, p,
-                                    journal=False)) is not None]
+    res, ids_ok = [], []
+    for j, (d0, d1) in enumerate(fenetres):
+        r = simuler_fenetre(sc_in, sc_out, panels, d0, d1, p, journal=False)
+        if r is not None:
+            res.append(r)
+            ids_ok.append(ids_episode[j] if ids_episode is not None else j)
     if not res:
         return None
 
     df = pd.DataFrame(res)
+    df["episode"] = ids_ok
     pnl = df.pnl_pct
     couv = df.couverture_moy.mean()
     return {
@@ -345,7 +355,9 @@ def bootstrap_couple(p_in, p_out, panels: dict, h: int, fenetres: list,
         "%_fenetres_positives": (pnl > 0).mean() * 100,
         # t de Student : les fenêtres sont disjointes, donc indépendantes
         "t_stat": pnl.mean() / (pnl.std() / np.sqrt(len(pnl))) if pnl.std() > 0 else np.nan,
+        "t_groupe": _t_groupe(pnl.to_numpy(), np.asarray(ids_ok)),
         "n_fenetres": len(pnl),
+        "n_episodes": int(len(set(ids_ok))),
         "trades_moy": df.n_trades.mean(),
         "frais_moy_%": df.frais_pct.mean(),
         "couverture_moy": couv,
@@ -354,25 +366,50 @@ def bootstrap_couple(p_in, p_out, panels: dict, h: int, fenetres: list,
     }
 
 
+def _t_groupe(v: np.ndarray, ids: np.ndarray) -> float:
+    """t de Student groupé par épisode : on agrège d'abord par épisode."""
+    ok = ~np.isnan(v)
+    v, ids = v[ok], ids[ok]
+    if len(v) < 2:
+        return np.nan
+    moy = np.array([v[ids == g].mean() for g in np.unique(ids)])
+    if len(moy) < 2 or moy.std(ddof=1) == 0:
+        return np.nan
+    return float(moy.mean() / (moy.std(ddof=1) / np.sqrt(len(moy))))
+
+
 def bootstrap_tous(paniers_in: list, paniers_out: list, panels: dict,
                    horizons: dict = None, debut=None, fin=None,
                    p: ParamsBS = None, marge_init: int = 300,
+                   fenetres_par_horizon: dict = None,
                    verbose: bool = True) -> dict:
-    """Produit cartésien entrée x sortie x horizon."""
+    """Produit cartésien entrée x sortie x horizon.
+
+    fenetres_par_horizon : {nom_horizon: (fenetres, ids_episode)} pour imposer des
+    fenêtres calculées ailleurs. C'est par là que passe la subdivision par régime
+    macro (voir regimes.fenetres_regime).
+    """
     p = p or ParamsBS()
     horizons = horizons or HORIZONS
     idx = panels["close"].index
 
     lignes, detail = [], {}
     for nom_h, h in horizons.items():
-        fen = fenetres_disjointes(idx, h, debut, fin, marge_init)
+        if fenetres_par_horizon is not None:
+            if nom_h not in fenetres_par_horizon:
+                continue
+            fen, ids = fenetres_par_horizon[nom_h]
+        else:
+            fen = fenetres_disjointes(idx, h, debut, fin, marge_init)
+            ids = None
         if verbose:
-            print(f"  {nom_h} (h={h}) : {len(fen)} fenêtres disjointes")
+            sup = f", {len(set(ids))} épisodes" if ids else ""
+            print(f"  {nom_h} (h={h}) : {len(fen)} fenêtres{sup}")
         if not fen:
             continue
         for pi in paniers_in:
             for po in paniers_out:
-                r = bootstrap_couple(pi, po, panels, h, fen, p)
+                r = bootstrap_couple(pi, po, panels, h, fen, p, ids)
                 if r is None:
                     continue
                 cle = (nom_h, pi.nom, po.nom)
@@ -392,7 +429,10 @@ def bootstrap_tous(paniers_in: list, paniers_out: list, panels: dict,
         best = sous.sort_values("pnl_moyen_%", ascending=False).iloc[0]
         meilleurs[g] = {"entree": best.entree, "sortie": best.sortie,
                         "pnl": best["pnl_moyen_%"], "t": best.t_stat,
-                        "n_fen": best.n_fenetres, "couverture": best.couverture_moy}
+                        "t_groupe": best.get("t_groupe", np.nan),
+                        "n_fen": best.n_fenetres,
+                        "n_eps": best.get("n_episodes", np.nan),
+                        "couverture": best.couverture_moy}
 
     return {"tableau": tab.sort_values(["groupe", "pnl_moyen_%"],
                                        ascending=[True, False]),
@@ -404,9 +444,10 @@ def resume_bootstrap(res: dict, top: int = 5) -> str:
     if tab.empty:
         return "Aucun couple exploitable."
     L = []
-    cols = ["entree", "sortie", "pnl_moyen_%", "pnl_std_%", "t_stat",
-            "%_fenetres_positives", "n_fenetres", "trades_moy",
-            "couverture_moy", "exploitable"]
+    cols = [c for c in ["entree", "sortie", "pnl_moyen_%", "pnl_std_%", "t_stat",
+                        "t_groupe", "%_fenetres_positives", "n_fenetres",
+                        "n_episodes", "trades_moy", "couverture_moy", "exploitable"]
+            if c in tab.columns]
     for g in tab.groupe.unique():
         m = res["meilleurs"][g]
         L.append("=" * 100)
@@ -418,7 +459,10 @@ def resume_bootstrap(res: dict, top: int = 5) -> str:
         L.append("")
     L.append("LECTURE")
     L.append("  pnl_moyen_%  P&L moyen sur la fenêtre, en % du capital de départ.")
-    L.append("  t_stat       fenêtres disjointes = observations indépendantes.")
+    L.append("  t_stat       naïf : suppose chaque fenêtre indépendante.")
+    L.append("  t_groupe     groupé par ÉPISODE de régime. Trois fenêtres du même")
+    L.append("               épisode partagent le même contexte macro : ce t-là")
+    L.append("               est le seul honnête, et toujours inférieur.")
     L.append("               |t| > 2 -> P&L moyen non nul. Mais attention au")
     L.append("               nombre d'essais : on retient le max de 9 couples.")
     L.append("  couverture   titres passant les barrières dures. Sous 5, le panier")
