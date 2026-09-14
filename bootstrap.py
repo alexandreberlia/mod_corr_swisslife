@@ -186,9 +186,7 @@ def simuler_fenetre(sc_in: pd.DataFrame, sc_out: pd.DataFrame, panels: dict,
                     s["stop"] = max(s["stop"], s["plus_haut"] - p.trail_atr * a)
 
         if journal:
-            vp = sum(s["qty"] * cl.loc[d, t] for t, s in pos.items()
-                     if not np.isnan(cl.loc[d, t]))
-            courbe[i] = cash + vp
+            courbe[i] = cash + _valoriser(pos, cl, d, i)
 
         # ---- pas de décision le dernier jour : on valorise et on s'arrête ----
         if i == len(idx) - 1 or (i % p.freq_decision):
@@ -225,10 +223,9 @@ def simuler_fenetre(sc_in: pd.DataFrame, sc_out: pd.DataFrame, panels: dict,
             continue
         cand = cand.nlargest(libres)
 
-        libere = sum(pos[t]["qty"] * cl.loc[d, t] for t in ordres["out"]
-                     if not np.isnan(cl.loc[d, t]))
-        equity = cash + sum(pos[t]["qty"] * cl.loc[d, t] for t in pos
-                            if not np.isnan(cl.loc[d, t]))
+        libere = _valoriser({t: pos[t] for t in ordres["out"] if t in pos},
+                            cl, d, i)
+        equity = cash + _valoriser(pos, cl, d, i)
         dispo = cash + libere
         if dispo < equity * p.poids_min:
             continue
@@ -243,8 +240,7 @@ def simuler_fenetre(sc_in: pd.DataFrame, sc_out: pd.DataFrame, panels: dict,
 
     # ---- valorisation finale : PAS d'ordre de vente ----
     d_fin = idx[-1]
-    val_pos = sum(s["qty"] * cl.loc[d_fin, t] for t, s in pos.items()
-                  if not np.isnan(cl.loc[d_fin, t]))
+    val_pos = _valoriser(pos, cl, d_fin, len(idx) - 1)
     equity = cash + val_pos
 
     sortie_journal = {}
@@ -282,6 +278,26 @@ def simuler_fenetre(sc_in: pd.DataFrame, sc_out: pd.DataFrame, panels: dict,
         "couverture_moy": float(np.mean(couv)) if couv else 0.0,
         "expo_finale": val_pos / equity if equity > 0 else 0.0,
     }
+
+
+def _valoriser(pos: dict, cl: pd.DataFrame, d, i: int) -> float:
+    """Valeur des positions au jour d, avec REPORT du dernier prix connu.
+
+    Point critique : ne JAMAIS omettre une position dont le prix est NaN. Une
+    omission fait disparaître la ligne de la valorisation le temps d'une barre
+    et produit une chute artificielle de l'equity vers zéro — le symptôme des
+    jours fériés partiels issus de l'union des calendriers. Une position non
+    cotée existe toujours : on la valorise au dernier cours connu.
+    """
+    total = 0.0
+    for t, s in pos.items():
+        px = cl.loc[d, t]
+        if np.isnan(px):
+            serie = cl[t].iloc[:i + 1]
+            dispo = serie[serie.notna()]
+            px = dispo.iloc[-1] if len(dispo) else s["px_in"]
+        total += s["qty"] * px
+    return float(total)
 
 
 def _journal_trade(t, s, d_out, px_out, motif, cost) -> dict:
