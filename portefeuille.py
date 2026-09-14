@@ -76,12 +76,18 @@ class ParamsPF:
 # Construction des panels
 # ============================================================================
 
-def construire_panels(prix: dict, Indicateurs, p: ParamsPF, generateur=None) -> dict:
+def construire_panels(prix: dict, Indicateurs, p: ParamsPF, generateur=None,
+                      min_cotation: float = 0.60, ffill_limite: int = 3) -> dict:
     """prix : {ticker: DataFrame OHLCV}. Renvoie un dict de panels (dates x tickers).
 
     generateur : fonction ind -> dict[str, Series].
                  None => jeu minimal. Passer `features_orientees` (features.py) pour
                  le catalogue complet — OBLIGATOIRE si les poids viennent de l'IC.
+    min_cotation : part minimale de titres cotant pour qu'une date soit retenue
+                 comme séance. 0.60 écarte les jours fériés partiels issus de
+                 l'union des calendriers. Mettre 0 pour désactiver.
+    ffill_limite : nombre de séances pendant lesquelles on reporte le dernier
+                 prix connu d'un titre suspendu. 0 pour désactiver.
     """
     feats, aux = {}, {}
 
@@ -115,6 +121,32 @@ def construire_panels(prix: dict, Indicateurs, p: ParamsPF, generateur=None) -> 
 
     out = {c: panel(feats, c) for c in next(iter(feats.values())).columns}
     out |= {c: panel(aux, c) for c in next(iter(aux.values())).columns}
+
+    # ------------------------------------------------------------------
+    # Nettoyage du calendrier.
+    #
+    # L'assemblage par `pd.DataFrame({ticker: serie})` produit l'UNION des dates
+    # de tous les titres. Un jour férié sur une place mais ouvré ailleurs crée
+    # donc une ligne où la quasi-totalité des titres est NaN. Sans traitement,
+    # ces titres disparaissent de la valorisation du portefeuille le temps d'une
+    # barre : l'equity chute à zéro puis revient. Deux parades cumulées.
+    #
+    # (a) on supprime les dates où trop peu de titres cotent : ce ne sont pas
+    #     des séances exploitables, aucune décision ne peut y être prise ;
+    # (b) sur les trous résiduels (suspension d'un titre isolé), on reporte le
+    #     dernier prix connu, avec une limite : au-delà, la donnée est trop
+    #     ancienne pour valoriser honnêtement.
+    # ------------------------------------------------------------------
+    cl = out["close"]
+    part = cl.notna().sum(axis=1) / max(cl.shape[1], 1)
+    seances = part >= min_cotation
+    if not seances.all():
+        out = {k: v.loc[seances] for k, v in out.items()}
+
+    if ffill_limite:
+        for c in ("open", "high", "low", "close"):
+            out[c] = out[c].ffill(limit=ffill_limite)
+
     return out
 
 
