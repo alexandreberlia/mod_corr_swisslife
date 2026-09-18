@@ -105,7 +105,8 @@ def fenetres_disjointes(index: pd.DatetimeIndex, h: int, debut=None, fin=None,
 # ============================================================================
 
 def simuler_fenetre(sc_in: pd.DataFrame, sc_out: pd.DataFrame, panels: dict,
-                    d0, d1, p: ParamsBS, journal: bool = False) -> dict:
+                    d0, d1, p: ParamsBS, journal: bool = False,
+                    decision_finale: bool = False) -> dict:
     """Une fenêtre, jour par jour. Renvoie le P&L en % du capital.
 
     Ordre à chaque barre :
@@ -113,6 +114,11 @@ def simuler_fenetre(sc_in: pd.DataFrame, sc_out: pd.DataFrame, panels: dict,
       2. stop-loss touché en séance (prioritaire sur tout signal)
       3. décision de sortie sur la clôture -> exécutée demain
       4. décision d'entrée sur la clôture -> exécutée demain
+
+    decision_finale : en backtest on saute la décision du dernier jour (elle ne
+    pourrait pas être exécutée). En PRODUCTION c'est exactement ce qu'on veut :
+    la décision prise sur la dernière clôture connue, à exécuter à la prochaine
+    ouverture. Renvoyée dans `ordres_en_attente`.
     """
     op, hi, lo, cl = panels["open"], panels["high"], panels["low"], panels["close"]
     atr = panels["atr"]
@@ -189,7 +195,8 @@ def simuler_fenetre(sc_in: pd.DataFrame, sc_out: pd.DataFrame, panels: dict,
             courbe[i] = cash + _valoriser(pos, cl, d, i)
 
         # ---- pas de décision le dernier jour : on valorise et on s'arrête ----
-        if i == len(idx) - 1 or (i % p.freq_decision):
+        dernier = (i == len(idx) - 1)
+        if (dernier and not decision_finale) or (i % p.freq_decision):
             continue
 
         # ---- 3. sorties (score de sortie sur la clôture du jour) ----
@@ -243,6 +250,9 @@ def simuler_fenetre(sc_in: pd.DataFrame, sc_out: pd.DataFrame, panels: dict,
     val_pos = _valoriser(pos, cl, d_fin, len(idx) - 1)
     equity = cash + val_pos
 
+    en_attente = {"ventes": list(ordres["out"]),
+                  "achats": dict(ordres["in"])} if decision_finale else {}
+
     sortie_journal = {}
     if journal:
         courbe[0] = p.capital
@@ -268,6 +278,8 @@ def simuler_fenetre(sc_in: pd.DataFrame, sc_out: pd.DataFrame, panels: dict,
 
     return {
         **sortie_journal,
+        "ordres_en_attente": en_attente,
+        "positions_vives": dict(pos),
         "debut": idx[0], "fin": d_fin,
         "pnl_pct": (equity / p.capital - 1) * 100,
         "equity": equity,
