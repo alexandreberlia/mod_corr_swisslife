@@ -211,7 +211,7 @@ def filtrer(res: dict, min_signaux: int = 20,
 
 def tableau(res: dict, quoi: str = "taux", min_signaux: int = 20,
             base_max: float = 0.60, pourcent: bool = True) -> pd.DataFrame:
-    """Le tableau de correspondance filtré, prêt à lire ou à exporter.
+    """La matrice filtrée, forme carrée déclencheurs x suiveurs.
 
     quoi : "taux" | "suivis" | "simultane"
     """
@@ -222,73 +222,104 @@ def tableau(res: dict, quoi: str = "taux", min_signaux: int = 20,
     return d
 
 
+def _aplatir(d: pd.DataFrame, nom: str) -> pd.DataFrame:
+    """Matrice carrée -> colonne longue indexée (declencheur, suiveur)."""
+    return (d.rename_axis(index="declencheur", columns="suiveur")
+             .reset_index()
+             .melt(id_vars="declencheur", var_name="suiveur", value_name=nom))
+
+
+def couples(res: dict, min_signaux: int = 20, base_max: float = 0.60,
+            tri: str = "taux_%") -> pd.DataFrame:
+    """TOUS les couples passant les filtres, une ligne par couple.
+
+    Colonnes, toutes issues de comptages :
+        n_signaux    signaux du déclencheur          (dénominateur)
+        suivis       signaux suivis d'un suiveur     (numérateur)
+        taux_%       suivis / n_signaux
+        base_%       part des fenêtres de l'historique contenant le suiveur,
+                     sans conditionner sur le déclencheur
+        meme_jour_%  part des signaux du déclencheur où le suiveur sort LE
+                     JOUR MÊME
+    """
+    lig, colo, _ = filtrer(res, min_signaux, base_max)
+    if not lig or not colo:
+        return pd.DataFrame()
+
+    d = _aplatir((res["taux"].loc[lig, colo] * 100).round(1), "taux_%")
+    for quoi, nom, mult in (("suivis", "suivis", 1),
+                            ("simultane", "meme_jour_%", 100)):
+        m = res[quoi].loc[lig, colo]
+        m = (m * 100).round(1) if mult == 100 else m
+        d = d.merge(_aplatir(m, nom), on=["declencheur", "suiveur"], how="left")
+
+    d = d.dropna(subset=["taux_%"])                  # retire la diagonale
+    d["n_signaux"] = d.declencheur.map(res["n_signaux"])
+    d["base_%"] = d.suiveur.map((res["base"] * 100).round(1))
+
+    return (d.set_index(["declencheur", "suiveur"])
+             [["n_signaux", "suivis", "taux_%", "base_%", "meme_jour_%"]]
+             .sort_values(tri, ascending=False))
+
+
 # ============================================================================
 # 5. Rapport
 # ============================================================================
 
-def resume(res: dict, min_signaux: int = 20, base_max: float = 0.60) -> str:
-    """Effectifs, puis le tableau de correspondance COMPLET, puis les comptages
-    bruts dont il est issu."""
+def resume(res: dict, min_signaux: int = 20, base_max: float = 0.60,
+           top: int | None = None, tri: str = "taux_%") -> str:
+    """Effectifs, puis TOUS les couples passant les filtres, un par ligne.
+
+    top : None affiche tout. Un entier limite aux `top` premiers couples.
+    """
     p = res["params"]
     lig, colo, journal = filtrer(res, min_signaux, base_max)
 
-    L = ["=" * 100,
+    L = ["=" * 92,
          f"TABLEAU DE CORRESPONDANCE — fenêtre [t+{p['decalage_min']} ; "
          f"t+{p['h']}]",
-         "=" * 100,
+         "=" * 92,
          f"  {p['n_seances']} séances, {p['n_valide']} exploitables"
          f"{' (h dernières tronquées)' if p['tronquer'] else ''}",
          f"  filtres : >= {min_signaux} signaux en ligne, base <= "
          f"{base_max:.0%} en colonne",
          "",
-         "EFFECTIFS", "-" * 100, journal.to_string(), ""]
+         "EFFECTIFS", "-" * 92, journal.to_string(), ""]
 
-    if not lig or not colo:
+    c = couples(res, min_signaux, base_max, tri)
+    if c.empty:
         L.append("Aucun couple ne passe les filtres.")
         return "\n".join(L)
 
-    L += ["=" * 100,
-          f"TAUX DE SUIVI, EN % — {len(lig)} déclencheurs x {len(colo)} suiveurs",
-          "=" * 100,
-          "  ligne = declencheur, colonne = suiveur",
-          f"  case [A, B] = % des signaux de A pour lesquels B se declenche "
-          f"dans [t+{p['decalage_min']} ; t+{p['h']}]",
+    montre = c if top is None else c.head(top)
+    L += ["=" * 92,
+          f"COUPLES — {len(c)} au total"
+          + (f", {len(montre)} affichés" if top else "")
+          + f", triés par {tri} décroissant",
+          "=" * 92,
+          montre.to_string(),
           "",
-          tableau(res, "taux", min_signaux, base_max).to_string(),
+          "  n_signaux   signaux du declencheur                   denominateur",
+          "  suivis      dont un signal du suiveur dans la fenetre numerateur",
+          "  taux_%      suivis / n_signaux",
+          "  base_%      part des fenetres de l'historique contenant le",
+          "              suiveur, sans conditionner sur le declencheur",
+          "  meme_jour_% part des signaux du declencheur ou le suiveur sort LE",
+          "              JOUR MEME. Proche de taux_% => les deux sortent",
+          "              ensemble plutot que l'un apres l'autre.",
           "",
-          "=" * 100,
-          "COMPTAGES BRUTS (numerateurs)",
-          "=" * 100,
-          tableau(res, "suivis", min_signaux, base_max).to_string(),
-          "",
-          "  denominateurs (n_signaux du declencheur) :",
-          "  " + res["n_signaux"][lig].to_string().replace("\n", "\n  "),
-          "",
-          "=" * 100,
-          "DONT LE MEME JOUR, EN %",
-          "=" * 100,
-          "  case [A, B] = % des signaux de A ou B se declenche LE JOUR MEME.",
-          "  Proche du taux de suivi => les deux indicateurs sortent ensemble",
-          "  plutot que l'un apres l'autre.",
-          "",
-          tableau(res, "simultane", min_signaux, base_max).to_string(),
-          "",
-          "=" * 100,
-          "POUR REFERENCE — base de chaque suiveur, en %",
-          "=" * 100,
-          "  part des fenetres de l'historique contenant un signal de ce",
-          "  suiveur, sans conditionner sur un declencheur. Second comptage",
-          "  sur les memes donnees, a comparer aux taux ci-dessus.",
-          "",
-          "  " + (res["base"][colo] * 100).round(1).to_string()
-                     .replace("\n", "\n  ")]
+          "  Lecture : la ligne (A, B) se lit « B suit A ». Le tableau est",
+          "  asymetrique, (A, B) et (B, A) sont deux lignes distinctes.",
+          "  La matrice carree reste disponible : tableau(res, \"taux\")."]
     return "\n".join(L)
 
 
 def exporter(res: dict, chemin: str = "matrice_suivi.xlsx",
              min_signaux: int = 20, base_max: float = 0.60) -> str:
-    """Feuilles filtrées, puis les matrices complètes non filtrées."""
+    """Les couples en liste, les matrices filtrées, puis les matrices complètes."""
     with pd.ExcelWriter(chemin, engine="openpyxl") as w:
+        couples(res, min_signaux, base_max).to_excel(w, sheet_name="couples")
+
         for quoi in ("taux", "suivis", "simultane"):
             tableau(res, quoi, min_signaux, base_max).to_excel(
                 w, sheet_name=f"{quoi}_filtre")
