@@ -22,11 +22,34 @@ CORRECTIONS DE SÉCURITÉ, SANS CHANGEMENT DE LOGIQUE
     cohérent avec le `calendrier.get_loc(date)` de la sortie
   - `signaux_dans_fenetre` : les NaN devenaient des signaux actifs
 
+NOUVEAU — POT COMMUN
+  Les sous-portefeuilles ne sont plus indépendants. Ils n'ont plus de cash
+  propre : ce sont des EMPLACEMENTS, occupé ou libre. Il y a une seule
+  trésorerie et un POT alimenté par les plus-values et moins-values RÉALISÉES.
+
+  À chaque entrée, la position reçoit :
+
+      montant = base + (nombre_indicateurs / nombre_sous_portefeuilles)
+                       * pot_disponible
+
+  base             = capital_initial / nombre_sous_portefeuilles (5 000), fixe
+  nombre_indicateurs = indicateurs d'entrée actifs dans la fenêtre (2 à 5,
+                     la porte d'entrée en exige au moins 2)
+  pot_disponible   = pot total - part du pot déjà immobilisée dans les
+                     positions ouvertes
+
+  L'entrée PRÉLÈVE sa part du pot, la sortie la LIBÈRE. Sans ce prélèvement,
+  la même plus-value serait allouée à chaque nouvelle position et
+  l'engagement total dépasserait la trésorerie. Mécanisme symétrique : une
+  moins-value réduit le pot, donc la taille des positions suivantes.
+
+  Le pot non investi reste en cash, rémunéré à 0 pour l'instant.
+
 NON MODIFIÉ
   tes seuils (sauf celui de `hist`, dont l'unité a changé), pas de train/test,
-  dimensionnement à 100 % du cash de la poche, entrée à l'ouverture et sortie
-  à la clôture, le stop ne se déclenche pas le jour de l'entrée, calendrier en
-  union, pas de plafond sectoriel, quantités fractionnaires.
+  entrée à l'ouverture et sortie à la clôture, le stop ne se déclenche pas le
+  jour de l'entrée, calendrier en union, pas de plafond sectoriel, quantités
+  fractionnaires.
 """
 
 import numpy as np
@@ -474,13 +497,16 @@ def backtest_portefeuille_multi_titres(
     """
     Backtest global multi-titres.
 
-    Le capital initial est divisé en plusieurs poches indépendantes.
+    Les sous-portefeuilles sont des EMPLACEMENTS, pas des comptes : une seule
+    trésorerie, et un POT commun alimenté par les plus-values et moins-values
+    réalisées.
 
-    Chaque poche :
+    Chaque emplacement :
         - détient au maximum une position ;
-        - investit 100 % de son cash ;
-        - récupère le capital à la sortie ;
-        - réinvestit ensuite sa nouvelle valeur.
+        - reçoit à l'entrée la base plus une part du pot proportionnelle au
+          nombre d'indicateurs ayant déclenché ;
+        - rend tout à la trésorerie à la sortie ;
+        - libère alors la part du pot qu'il immobilisait.
 
     Une seule position simultanée est autorisée par ticker.
     """
@@ -574,14 +600,25 @@ def backtest_portefeuille_multi_titres(
     # 3. Initialisation des poches
     # ==========================================================
 
-    capital_par_poche = (
+    # Base fixe par emplacement. Elle ne bouge jamais : seule la part du
+    # pot fait varier la taille des positions.
+    base_par_poche = (
         capital_initial
         / nombre_sous_portefeuilles
     )
 
+    # Trésorerie unique. Les emplacements n'ont plus de cash propre.
+    cash = float(capital_initial)
+
+    # Pot commun : plus-values et moins-values RÉALISÉES, cumulées.
+    pot_total = 0.0
+
+    # Part du pot actuellement immobilisée dans les positions ouvertes.
+    # pot_disponible = pot_total - pot_engage
+    pot_engage = 0.0
+
     poches = {
         numero: {
-            "cash": float(capital_par_poche),
             "ticker": None,
         }
         for numero in range(
@@ -589,6 +626,9 @@ def backtest_portefeuille_multi_titres(
             nombre_sous_portefeuilles + 1,
         )
     }
+
+    # Compteur des entrées rognées faute de trésorerie suffisante.
+    entrees_plafonnees = 0
 
     # Une position par ticker.
     positions_ouvertes = {}
@@ -772,17 +812,19 @@ def backtest_portefeuille_multi_titres(
                 - frais_sortie
             )
 
-            # La poche récupère tout le capital.
-            poches[numero_poche]["cash"] = (
-                capital_apres_sortie
-            )
-
-            poches[numero_poche]["ticker"] = None
-
             pnl_montant = (
                 capital_apres_sortie
                 - position["capital_avant_entree"]
             )
+
+            # La trésorerie récupère tout le produit de la vente, le pot
+            # encaisse le résultat réalisé, et la part du pot que cette
+            # position immobilisait est libérée pour les entrées suivantes.
+            cash += capital_apres_sortie
+            pot_total += pnl_montant
+            pot_engage -= position["part_du_pot"]
+
+            poches[numero_poche]["ticker"] = None
 
             rendement = (
                 capital_apres_sortie
@@ -830,6 +872,21 @@ def backtest_portefeuille_multi_titres(
 
                 "Niveau stop":
                     position["niveau_stop"],
+
+                "Nombre d'indicateurs":
+                    position["nombre_indicateurs"],
+
+                "Pot disponible avant":
+                    position["pot_disponible_avant"],
+
+                "Part du pot":
+                    position["part_du_pot"],
+
+                "Montant cible":
+                    position["montant_cible"],
+
+                "Plafonné par la trésorerie":
+                    position["plafonne"],
 
                 "Capital avant entrée":
                     position[
@@ -1024,15 +1081,65 @@ def backtest_portefeuille_multi_titres(
             ):
                 continue
 
-            capital_avant_entree = float(
-                poches[numero_poche]["cash"]
+            # ==================================================
+            # Dimensionnement : base + part du pot commun
+            #
+            # La part est proportionnelle au nombre d'indicateurs
+            # d'entrée actifs : 2 indicateurs -> 2/20 du pot
+            # disponible, 3 -> 3/20, etc.
+            #
+            # Le pot disponible exclut ce que les positions déjà
+            # ouvertes immobilisent : sans cela la même plus-value
+            # serait allouée à chaque nouvelle entrée et
+            # l'engagement total dépasserait la trésorerie.
+            # ==================================================
+
+            nombre_indicateurs = candidat["nombre_signaux"]
+
+            pot_disponible = pot_total - pot_engage
+
+            part_du_pot = (
+                nombre_indicateurs
+                / nombre_sous_portefeuilles
+            ) * pot_disponible
+
+            montant_cible = (
+                base_par_poche
+                + part_du_pot
+            )
+
+            if montant_cible <= 0:
+                continue
+
+            # Aucun levier : on n'engage jamais plus que la
+            # trésorerie disponible. Avec un pot positif ce
+            # plafond ne mord pas, mais il protège le cas où les
+            # moins-values rendent le pot négatif.
+            capital_avant_entree = min(
+                montant_cible,
+                cash,
             )
 
             if capital_avant_entree <= 0:
                 continue
 
+            plafonne = bool(
+                capital_avant_entree
+                < montant_cible - 1e-9
+            )
+
+            if plafonne:
+                entrees_plafonnees += 1
+
+                # La part du pot réellement prélevée est réduite
+                # dans la même proportion que l'engagement.
+                part_du_pot = (
+                    capital_avant_entree
+                    - base_par_poche
+                )
+
             # On réserve les frais avant d'investir, pour ne
-            # jamais dépasser le cash de la poche.
+            # jamais dépasser la trésorerie engagée.
             montant_investi = (
                 capital_avant_entree
                 / (1 + taux_frais)
@@ -1053,7 +1160,9 @@ def backtest_portefeuille_multi_titres(
                 - stop_atr * atr_entree
             )
 
-            poches[numero_poche]["cash"] = 0.0
+            cash -= capital_avant_entree
+            pot_engage += part_du_pot
+
             poches[numero_poche]["ticker"] = ticker
 
             positions_ouvertes[ticker] = {
@@ -1080,6 +1189,21 @@ def backtest_portefeuille_multi_titres(
                 "niveau_stop":
                     niveau_stop,
 
+                "nombre_indicateurs":
+                    nombre_indicateurs,
+
+                "pot_disponible_avant":
+                    pot_disponible,
+
+                "part_du_pot":
+                    part_du_pot,
+
+                "montant_cible":
+                    montant_cible,
+
+                "plafonne":
+                    plafonne,
+
                 "nombre_unites":
                     nombre_unites,
 
@@ -1105,10 +1229,7 @@ def backtest_portefeuille_multi_titres(
         # C. VALORISATION DU JOUR
         # ======================================================
 
-        cash_total = sum(
-            poche["cash"]
-            for poche in poches.values()
-        )
+        cash_total = cash
 
         valeur_positions = 0.0
 
@@ -1133,6 +1254,9 @@ def backtest_portefeuille_multi_titres(
             "Valeur positions": valeur_positions,
             "Valeur portefeuille":
                 cash_total + valeur_positions,
+            "Pot total": pot_total,
+            "Pot engagé": pot_engage,
+            "Pot disponible": pot_total - pot_engage,
             "Positions ouvertes":
                 len(positions_ouvertes),
             "Poches libres": sum(
@@ -1178,9 +1302,12 @@ def backtest_portefeuille_multi_titres(
                 - frais_sortie
             )
 
-            poches[numero_poche]["cash"] = (
+            cash += capital_apres_sortie
+            pot_total += (
                 capital_apres_sortie
+                - position["capital_avant_entree"]
             )
+            pot_engage -= position["part_du_pot"]
 
             poches[numero_poche]["ticker"] = None
 
@@ -1207,6 +1334,14 @@ def backtest_portefeuille_multi_titres(
                     position["indicateurs_requis_sortie"],
                 "ATR entrée": position["atr_entree"],
                 "Niveau stop": position["niveau_stop"],
+                "Nombre d'indicateurs":
+                    position["nombre_indicateurs"],
+                "Pot disponible avant":
+                    position["pot_disponible_avant"],
+                "Part du pot": position["part_du_pot"],
+                "Montant cible": position["montant_cible"],
+                "Plafonné par la trésorerie":
+                    position["plafonne"],
                 "Capital avant entrée":
                     position["capital_avant_entree"],
                 "Frais entrée": position["frais_entree"],
@@ -1236,15 +1371,13 @@ def backtest_portefeuille_multi_titres(
         # La dernière ligne de suivi doit refléter la clôture.
         if suivi_portefeuille:
 
-            cash_total = sum(
-                poche["cash"]
-                for poche in poches.values()
-            )
-
             suivi_portefeuille[-1].update({
-                "Cash": cash_total,
+                "Cash": cash,
                 "Valeur positions": 0.0,
-                "Valeur portefeuille": cash_total,
+                "Valeur portefeuille": cash,
+                "Pot total": pot_total,
+                "Pot engagé": pot_engage,
+                "Pot disponible": pot_total - pot_engage,
                 "Positions ouvertes": 0,
                 "Poches libres":
                     nombre_sous_portefeuilles,
@@ -1265,6 +1398,11 @@ def backtest_portefeuille_multi_titres(
         "Indicateurs requis sortie",
         "ATR entrée",
         "Niveau stop",
+        "Nombre d'indicateurs",
+        "Pot disponible avant",
+        "Part du pot",
+        "Montant cible",
+        "Plafonné par la trésorerie",
         "Capital avant entrée",
         "Frais entrée",
         "Montant investi",
@@ -1337,6 +1475,10 @@ def backtest_portefeuille_multi_titres(
                 position["indicateurs_requis_sortie"],
             "ATR entrée": position["atr_entree"],
             "Niveau stop": position["niveau_stop"],
+            "Nombre d'indicateurs":
+                position["nombre_indicateurs"],
+            "Part du pot": position["part_du_pot"],
+            "Montant cible": position["montant_cible"],
             "Nombre d'unités": position["nombre_unites"],
             "Capital avant entrée":
                 position["capital_avant_entree"],
@@ -1369,6 +1511,16 @@ def backtest_portefeuille_multi_titres(
         )
         if morceaux
         else pd.DataFrame()
+    )
+
+    print(
+        f"\nPot final : {pot_total:,.2f} $ "
+        f"(dont {pot_engage:,.2f} $ immobilisés)"
+    )
+
+    print(
+        f"Entrées rognées faute de trésorerie : "
+        f"{entrees_plafonnees}"
     )
 
     return (
