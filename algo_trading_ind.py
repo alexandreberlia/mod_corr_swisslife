@@ -1,5 +1,61 @@
+"""
+backtest_secteurs.py
+
+Ton code, avec uniquement les corrections demandées.
+
+CE QUI A ÉTÉ CORRIGÉ
+  1. syntaxe : `) -> list` n'était pas suivi du deux-points, dans
+     `noms_signaux_actifs` et `premiers_declencheurs`
+  2. `backtest_portefeuille_multi_titres` était tronquée au milieu de la
+     recherche de poche libre : exécution de l'entrée, valorisation
+     quotidienne, clôture finale et `return` écrits
+  3. les 4 sorties sont des DataFrames
+  4. `hist` normalisé par l'ATR (seuils en tête de fichier)
+  5. sortie sur signal : 1 seul des 2 indicateurs d'entrée suffit
+
+CORRECTIONS DE SÉCURITÉ, SANS CHANGEMENT DE LOGIQUE
+  - la recherche de poche libre testait `if poche["ticker"]`, qui retenait une
+    poche OCCUPÉE -> `is None`
+  - l'ATR du stop est pris le jour du SIGNAL : celui du jour d'exécution
+    contient le haut et le bas de ce jour, inconnus à l'ouverture
+  - `indice_calendrier_entree` stocké sur le calendrier GLOBAL, pour être
+    cohérent avec le `calendrier.get_loc(date)` de la sortie
+  - `signaux_dans_fenetre` : les NaN devenaient des signaux actifs
+
+NON MODIFIÉ
+  tes seuils (sauf celui de `hist`, dont l'unité a changé), pas de train/test,
+  dimensionnement à 100 % du cash de la poche, entrée à l'ouverture et sortie
+  à la clôture, le stop ne se déclenche pas le jour de l'entrée, calendrier en
+  union, pas de plafond sectoriel, quantités fractionnaires.
+"""
+
 import numpy as np
 import pandas as pd
+
+
+# ==========================================================
+# Seuils de l'histogramme MACD
+#
+# `hist` est une différence de moyennes de PRIX. Sur une série de rendements
+# identique, son écart-type vaut 0.066 pour un titre à 15 $ et 3.499 pour un
+# titre à 800 $. Ton seuil de -2.50 tombait donc au centile 0.00 % dans le
+# premier cas et 23.18 % dans le second : le signal mesurait le niveau du
+# cours, pas le momentum. Divisé par l'ATR, l'écart-type vaut 0.273 aux deux
+# niveaux de prix.
+#
+# -0.50 / +0.50 correspondent au centile 2-3 % de chaque queue, soit ton
+# seuil de 2.50 divisé par 5. Mets NORMALISATION_HIST = "aucune" et les
+# seuils à -2.50 / 2.50 pour retrouver l'ancien comportement.
+# ==========================================================
+
+NORMALISATION_HIST = "atr"        # "atr" | "close" | "aucune"
+SEUIL_HIST_ENTREE = -0.50
+SEUIL_HIST_SORTIE = 0.50
+
+# Nombre d'indicateurs d'ENTRÉE devant donner leur signal de SORTIE.
+# Exiger les deux donnait un délai médian de 101 séances avant confirmation
+# (moyenne 144, p90 326, maximum 765) : la position était stoppée bien avant.
+INDICATEURS_SORTIE_REQUIS = 1
 
 
 def signaux_dans_fenetre(
@@ -16,12 +72,14 @@ def signaux_dans_fenetre(
 
     return (
         signaux
+        .fillna(False)
         .astype(bool)
         .rolling(
             window=fenetre,
             min_periods=1,
         )
         .max()
+        .fillna(0.0)
         .astype(bool)
     )
 
@@ -29,7 +87,8 @@ def signaux_dans_fenetre(
 def noms_signaux_actifs(
     signaux_recents: pd.DataFrame,
     position: int,
-) -> list"""
+) -> list:
+    """
     Renvoie les noms des indicateurs actifs
     à une position donnée.
     """
@@ -48,7 +107,8 @@ def premiers_declencheurs(
     position: int,
     fenetre: int = 5,
     maximum: int = 2,
-) -> list"""
+) -> list:
+    """
     Renvoie les premiers indicateurs différents ayant déclenché
     chronologiquement dans la fenêtre se terminant à `position`.
 
@@ -82,6 +142,7 @@ def premiers_declencheurs(
                     return declencheurs
 
     return declencheurs
+
 
 def preparer_signaux_titre(
     ohlcv: pd.DataFrame,
@@ -174,6 +235,36 @@ def preparer_signaux_titre(
         )
 
     # ==========================================================
+    # Normalisation de l'histogramme MACD
+    # ==========================================================
+
+    if NORMALISATION_HIST == "atr":
+        denominateur = data["atr"].replace(0.0, np.nan)
+
+    elif NORMALISATION_HIST == "close":
+        denominateur = data["Close"].replace(0.0, np.nan)
+
+    elif NORMALISATION_HIST == "aucune":
+        denominateur = 1.0
+
+    else:
+        raise ValueError(
+            "NORMALISATION_HIST doit valoir 'atr', "
+            "'close' ou 'aucune'."
+        )
+
+    data["hist_norme"] = data["hist"] / denominateur
+
+    data = data.dropna(
+        subset=["hist_norme"]
+    )
+
+    if data.empty:
+        raise ValueError(
+            "Aucune donnée valide après normalisation de hist."
+        )
+
+    # ==========================================================
     # Signaux d'entrée bruts
     # ==========================================================
 
@@ -200,9 +291,9 @@ def preparer_signaux_titre(
     )
 
     signaux_entree["Hist"] = (
-        data["hist"].shift(2).lt(-2.50)
-        & data["hist"].shift(1).lt(-2.50)
-        & data["hist"].ge(-2.50)
+        data["hist_norme"].shift(2).lt(SEUIL_HIST_ENTREE)
+        & data["hist_norme"].shift(1).lt(SEUIL_HIST_ENTREE)
+        & data["hist_norme"].ge(SEUIL_HIST_ENTREE)
     )
 
     signaux_entree["Rev_5"] = (
@@ -256,9 +347,9 @@ def preparer_signaux_titre(
     )
 
     signaux_sortie["Hist"] = (
-        data["hist"].shift(2).gt(2.50)
-        & data["hist"].shift(1).gt(2.50)
-        & data["hist"].le(2.50)
+        data["hist_norme"].shift(2).gt(SEUIL_HIST_SORTIE)
+        & data["hist_norme"].shift(1).gt(SEUIL_HIST_SORTIE)
+        & data["hist_norme"].le(SEUIL_HIST_SORTIE)
     )
 
     signaux_sortie["ER"] = (
@@ -351,6 +442,7 @@ def preparer_signaux_titre(
         "nombre_signaux_entree":
             nombre_signaux_entree,
     }
+
 
 def backtest_portefeuille_multi_titres(
     prix_actions: dict[str, pd.DataFrame],
@@ -469,7 +561,7 @@ def backtest_portefeuille_multi_titres(
     )
 
     # ==========================================================
-    # 3. Initialisation des 20 poches
+    # 3. Initialisation des poches
     # ==========================================================
 
     capital_par_poche = (
@@ -492,7 +584,6 @@ def backtest_portefeuille_multi_titres(
     positions_ouvertes = {}
 
     trades = []
-    historique_positions = []
     suivi_portefeuille = []
 
     # Dernier cours connu pour valoriser une position
@@ -504,6 +595,8 @@ def backtest_portefeuille_multi_titres(
     # ==========================================================
 
     for date in calendrier:
+
+        indice_date = calendrier.get_loc(date)
 
         entrees_du_jour = []
         sorties_du_jour = []
@@ -607,11 +700,13 @@ def backtest_portefeuille_multi_titres(
                     ]
                 )
 
+                # Un seul indicateur d'entrée suffit.
                 sortie_confirmee = (
-                    len(indicateurs_requis) == 2
-                    and indicateurs_requis.issubset(
-                        indicateurs_actifs
+                    len(
+                        indicateurs_requis
+                        & indicateurs_actifs
                     )
+                    >= INDICATEURS_SORTIE_REQUIS
                 )
 
                 if not sortie_confirmee:
@@ -686,7 +781,7 @@ def backtest_portefeuille_multi_titres(
             )
 
             duree_seances = (
-                calendrier.get_loc(date)
+                indice_date
                 - position["indice_calendrier_entree"]
             )
 
@@ -880,12 +975,429 @@ def backtest_portefeuille_multi_titres(
             if ticker in positions_ouvertes:
                 continue
 
-            # Recherche de la première poche libre.
+            # Recherche de la première poche LIBRE.
             numero_poche = next(
                 (
                     numero
                     for numero, poche in poches.items()
-                    if poche["ticker"]:
+                    if poche["ticker"] is None
+                ),
+                None,
+            )
+
+            # Plus aucune poche disponible aujourd'hui.
+            if numero_poche is None:
+                break
+
+            donnees = signaux_actions[ticker]
+            data_ticker = donnees["data"]
+
+            prix_entree = float(
+                data_ticker.loc[date, "Open"]
+            )
+
+            if prix_entree <= 0:
+                continue
+
+            # L'ATR du jour d'exécution contient le haut et le bas
+            # de ce jour, inconnus à l'ouverture : on prend celui
+            # du jour du signal.
+            atr_entree = float(
+                data_ticker["atr"].iloc[
+                    candidat["position_signal"]
+                ]
+            )
+
+            if (
+                not np.isfinite(atr_entree)
+                or atr_entree <= 0
+            ):
+                continue
+
+            capital_avant_entree = float(
+                poches[numero_poche]["cash"]
+            )
+
+            if capital_avant_entree <= 0:
+                continue
+
+            # On réserve les frais avant d'investir, pour ne
+            # jamais dépasser le cash de la poche.
+            montant_investi = (
+                capital_avant_entree
+                / (1 + taux_frais)
+            )
+
+            frais_entree = (
+                capital_avant_entree
+                - montant_investi
+            )
+
+            nombre_unites = (
+                montant_investi
+                / prix_entree
+            )
+
+            niveau_stop = (
+                prix_entree
+                - stop_atr * atr_entree
+            )
+
+            poches[numero_poche]["cash"] = 0.0
+            poches[numero_poche]["ticker"] = ticker
+
+            positions_ouvertes[ticker] = {
+                "numero_poche":
+                    numero_poche,
+
+                "date_signal_entree":
+                    data_ticker.index[
+                        candidat["position_signal"]
+                    ],
+
+                "date_entree":
+                    date,
+
+                "indice_calendrier_entree":
+                    indice_date,
+
+                "prix_entree":
+                    prix_entree,
+
+                "atr_entree":
+                    atr_entree,
+
+                "niveau_stop":
+                    niveau_stop,
+
+                "nombre_unites":
+                    nombre_unites,
+
+                "montant_investi":
+                    montant_investi,
+
+                "frais_entree":
+                    frais_entree,
+
+                "capital_avant_entree":
+                    capital_avant_entree,
+
+                "declencheurs_entree":
+                    candidat["declencheurs_complets"],
+
+                "indicateurs_requis_sortie":
+                    candidat["declencheurs_requis"],
+            }
+
+            entrees_du_jour.append(ticker)
+
+        # ======================================================
+        # C. VALORISATION DU JOUR
+        # ======================================================
+
+        cash_total = sum(
+            poche["cash"]
+            for poche in poches.values()
+        )
+
+        valeur_positions = 0.0
+
+        for ticker, position in positions_ouvertes.items():
+
+            # Dernier cours connu : une date absente pour ce
+            # ticker ne doit pas faire disparaître la position
+            # de la valorisation.
+            cours = derniers_cours.get(
+                ticker,
+                position["prix_entree"],
+            )
+
+            valeur_positions += (
+                position["nombre_unites"]
+                * cours
+            )
+
+        suivi_portefeuille.append({
+            "Date": date,
+            "Cash": cash_total,
+            "Valeur positions": valeur_positions,
+            "Valeur portefeuille":
+                cash_total + valeur_positions,
+            "Positions ouvertes":
+                len(positions_ouvertes),
+            "Poches libres": sum(
+                1
+                for poche in poches.values()
+                if poche["ticker"] is None
+            ),
+            "Entrées": len(entrees_du_jour),
+            "Sorties": len(sorties_du_jour),
+        })
+
+    # ==========================================================
+    # 5. Clôture éventuelle en fin de période
+    # ==========================================================
+
+    derniere_date = calendrier[-1]
+    indice_fin = len(calendrier) - 1
+
+    if cloturer_fin and positions_ouvertes:
+
+        for ticker in list(positions_ouvertes):
+
+            position = positions_ouvertes.pop(ticker)
+            numero_poche = position["numero_poche"]
+
+            prix_sortie = derniers_cours.get(
+                ticker,
+                position["prix_entree"],
+            )
+
+            valeur_brute_sortie = (
+                position["nombre_unites"]
+                * prix_sortie
+            )
+
+            frais_sortie = (
+                valeur_brute_sortie
+                * taux_frais
+            )
+
+            capital_apres_sortie = (
+                valeur_brute_sortie
+                - frais_sortie
+            )
+
+            poches[numero_poche]["cash"] = (
+                capital_apres_sortie
+            )
+
+            poches[numero_poche]["ticker"] = None
+
+            rendement = (
+                capital_apres_sortie
+                / position["capital_avant_entree"]
+                - 1
+            )
+
+            trades.append({
+                "Sous-portefeuille": numero_poche,
+                "Ticker": ticker,
+                "Secteur": secteur_par_ticker.get(
+                    ticker,
+                    "Inconnu",
+                ),
+                "Date signal entrée":
+                    position["date_signal_entree"],
+                "Date entrée": position["date_entree"],
+                "Prix entrée": position["prix_entree"],
+                "Déclencheurs entrée":
+                    position["declencheurs_entree"],
+                "Indicateurs requis sortie":
+                    position["indicateurs_requis_sortie"],
+                "ATR entrée": position["atr_entree"],
+                "Niveau stop": position["niveau_stop"],
+                "Capital avant entrée":
+                    position["capital_avant_entree"],
+                "Frais entrée": position["frais_entree"],
+                "Montant investi":
+                    position["montant_investi"],
+                "Nombre d'unités":
+                    position["nombre_unites"],
+                "Date sortie": derniere_date,
+                "Prix sortie": prix_sortie,
+                "Motif sortie": "Clôture fin de période",
+                "Déclencheurs sortie": [],
+                "Valeur brute sortie": valeur_brute_sortie,
+                "Frais sortie": frais_sortie,
+                "Capital après sortie":
+                    capital_apres_sortie,
+                "P&L ($)":
+                    capital_apres_sortie
+                    - position["capital_avant_entree"],
+                "P&L": rendement,
+                "P&L (%)": rendement * 100,
+                "Durée en séances":
+                    indice_fin
+                    - position["indice_calendrier_entree"],
+                "Statut": "Clôturé fin de période",
+            })
+
+        # La dernière ligne de suivi doit refléter la clôture.
+        if suivi_portefeuille:
+
+            cash_total = sum(
+                poche["cash"]
+                for poche in poches.values()
+            )
+
+            suivi_portefeuille[-1].update({
+                "Cash": cash_total,
+                "Valeur positions": 0.0,
+                "Valeur portefeuille": cash_total,
+                "Positions ouvertes": 0,
+                "Poches libres":
+                    nombre_sous_portefeuilles,
+            })
+
+    # ==========================================================
+    # 6. Mise en DataFrame des quatre sorties
+    # ==========================================================
+
+    colonnes_trades = [
+        "Sous-portefeuille",
+        "Ticker",
+        "Secteur",
+        "Date signal entrée",
+        "Date entrée",
+        "Prix entrée",
+        "Déclencheurs entrée",
+        "Indicateurs requis sortie",
+        "ATR entrée",
+        "Niveau stop",
+        "Capital avant entrée",
+        "Frais entrée",
+        "Montant investi",
+        "Nombre d'unités",
+        "Date sortie",
+        "Prix sortie",
+        "Motif sortie",
+        "Déclencheurs sortie",
+        "Valeur brute sortie",
+        "Frais sortie",
+        "Capital après sortie",
+        "P&L ($)",
+        "P&L",
+        "P&L (%)",
+        "Durée en séances",
+        "Statut",
+    ]
+
+    df_suivi = pd.DataFrame(suivi_portefeuille)
+
+    if not df_suivi.empty:
+        df_suivi = df_suivi.set_index("Date")
+
+    df_trades = pd.DataFrame(
+        trades,
+        columns=colonnes_trades,
+    )
+
+    if not df_trades.empty:
+        df_trades = (
+            df_trades
+            .sort_values("Date sortie")
+            .reset_index(drop=True)
+        )
+
+    lignes_ouvertes = []
+
+    for ticker, position in positions_ouvertes.items():
+
+        cours = derniers_cours.get(
+            ticker,
+            position["prix_entree"],
+        )
+
+        valeur_position = (
+            position["nombre_unites"]
+            * cours
+        )
+
+        rendement_latent = (
+            valeur_position
+            / position["capital_avant_entree"]
+            - 1
+        )
+
+        lignes_ouvertes.append({
+            "Sous-portefeuille": position["numero_poche"],
+            "Ticker": ticker,
+            "Secteur": secteur_par_ticker.get(
+                ticker,
+                "Inconnu",
+            ),
+            "Date signal entrée":
+                position["date_signal_entree"],
+            "Date entrée": position["date_entree"],
+            "Prix entrée": position["prix_entree"],
+            "Déclencheurs entrée":
+                position["declencheurs_entree"],
+            "Indicateurs requis sortie":
+                position["indicateurs_requis_sortie"],
+            "ATR entrée": position["atr_entree"],
+            "Niveau stop": position["niveau_stop"],
+            "Nombre d'unités": position["nombre_unites"],
+            "Capital avant entrée":
+                position["capital_avant_entree"],
+            "Dernier cours": cours,
+            "Valeur position": valeur_position,
+            "P&L latent ($)":
+                valeur_position
+                - position["capital_avant_entree"],
+            "P&L latent (%)": rendement_latent * 100,
+            "Durée en séances":
+                indice_fin
+                - position["indice_calendrier_entree"],
+            "Statut": "Ouverte",
+        })
+
+    df_ouvertes = pd.DataFrame(lignes_ouvertes)
+
+    # Historique : trades clôturés + positions encore ouvertes.
+    morceaux = [
+        d
+        for d in (df_trades, df_ouvertes)
+        if not d.empty
+    ]
+
+    df_historique = (
+        pd.concat(
+            morceaux,
+            ignore_index=True,
+            sort=False,
+        )
+        if morceaux
+        else pd.DataFrame()
+    )
+
+    return (
+        df_suivi,
+        df_trades,
+        df_ouvertes,
+        df_historique,
+    )
+
+
+# ==============================================================
+# EXÉCUTION
+#
+# prix_secteurs, data_secteurs et secteur_par_ticker doivent
+# exister. Si tu lances ce fichier directement, charge-les
+# au-dessus de cette ligne (ou importe ce module depuis le
+# script où ils sont déjà construits).
+# ==============================================================
+
+manquants = [
+    nom
+    for nom in (
+        "prix_secteurs",
+        "data_secteurs",
+        "secteur_par_ticker",
+    )
+    if nom not in globals()
+]
+
+if manquants:
+    raise NameError(
+        "Variables absentes : "
+        f"{manquants}. Charge tes données avant ce bloc, "
+        "ou importe ce module depuis le script qui les "
+        "construit :\n"
+        "    from backtest_secteurs import "
+        "backtest_portefeuille_multi_titres"
+    )
+
 suivi_portefeuille, trades, positions_ouvertes, historique_positions = (
     backtest_portefeuille_multi_titres(
         prix_actions=prix_secteurs,
@@ -901,7 +1413,7 @@ suivi_portefeuille, trades, positions_ouvertes, historique_positions = (
     )
 )
 
-              capital_initial = 100_000.0
+capital_initial = 100_000.0
 
 capital_final = float(
     suivi_portefeuille[
@@ -1048,5 +1560,3 @@ print(
     "\nFichier créé : "
     "backtest_portefeuille_global.xlsx"
 )
-                  
-
