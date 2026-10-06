@@ -31,7 +31,17 @@ NON MODIFIÉ
 
 import numpy as np
 import pandas as pd
+import warnings
+warnings.filterwarnings("ignore")
 
+import numpy as np
+import pandas as pd
+import yfinance as yf
+
+from indicateurs import Indicateurs
+from features import features_completes
+from portefeuille import ParamsPF, construire_panels
+from bootstrap import ParamsBS
 
 # ==========================================================
 # Seuils de l'histogramme MACD
@@ -1377,6 +1387,272 @@ def backtest_portefeuille_multi_titres(
 # au-dessus de cette ligne (ou importe ce module depuis le
 # script où ils sont déjà construits).
 # ==============================================================
+MODE        = "protocole"      # "protocole" | "panier"
+DATE_DEBUT  = "2025-01-01"     # 1re date où une position peut être ouverte
+CAPITAL     = 100_000.0
+
+# mode "panier" seulement : index dans PANIERS_ENTREE / PANIERS_SORTIE
+I_ENTREE, I_SORTIE = 0, 0
+
+P = ParamsBS(
+    capital=CAPITAL,
+    n_long=40,
+    stop_atr=2.5,
+    trail_atr=0,            # 5.0 pour un trailing chandelier
+    seuil_entree=0.3,
+    seuil_sortie=0.0,
+    sensibilite=0.0,           # sortie asymétrique. 0 = désactivée
+    cost_bps=10.0,
+    min_titres=1,
+)
+
+
+# ------------------------------------------------------------ 1. données
+# Historique BIEN ANTÉRIEUR à DATE_DEBUT : il amorce les indicateurs
+# (mom_12_1 exige 252 séances) et, en mode "protocole", sert d'entraînement.
+DEBUT_HISTO = str(pd.Timestamp(DATE_DEBUT) - pd.DateOffset(years=20))[:10]
+
+
+# ==============================================================
+# 1. Liste des secteurs
+# ==============================================================
+
+actions_par_secteur = {
+    "Industrie": [
+        "CAT",   # Caterpillar
+        "GE",    # GE Aerospace
+        "GEV",   # GE Vernova
+        "RTX",   # RTX
+        "DE",    # Deere
+        "ETN",   # Eaton
+        "UNP",   # Union Pacific
+        "BA",    # Boeing
+        "PH",    # Parker-Hannifin
+        "LMT",   # Lockheed Martin
+        "HON",   # Honeywell
+        "MMM",   # 3M
+        "UPS",   # UPS
+        "CSX",   # CSX
+        "GD",    # General Dynamics
+    ],
+
+    "Technologie": [
+        "AAPL",  # Apple
+        "MSFT",  # Microsoft
+        "NVDA",  # Nvidia
+        "AVGO",  # Broadcom
+        "AMD",   # Advanced Micro Devices
+        "MU",    # Micron Technology
+        "INTC",  # Intel
+        "CSCO",  # Cisco
+        "ORCL",  # Oracle
+        "CRM",   # Salesforce
+        "IBM",   # IBM
+        "QCOM",  # Qualcomm
+        "TXN",   # Texas Instruments
+        "AMAT",  # Applied Materials
+        "LRCX",  # Lam Research
+        "PANW",  # Palo Alto Networks
+        "CRWD",  # CrowdStrike
+        "PLTR",  # Palantir
+        "ADBE",  # Adobe
+        "ANET",  # Arista Networks
+    ],
+
+    "Consommation_discretionnaire": [
+        "AMZN",  # Amazon
+        "TSLA",  # Tesla
+        "HD",    # Home Depot
+        "MCD",   # McDonald's
+        "LOW",   # Lowe's
+        "SBUX",  # Starbucks
+        "NKE",   # Nike
+        "BKNG",  # Booking Holdings
+        "TJX",   # TJX Companies
+        "ORLY",  # O'Reilly Automotive
+        "ROST",  # Ross Stores
+        "MAR",   # Marriott
+        "GM",    # General Motors
+        "F",     # Ford
+        "ABNB",  # Airbnb
+        "YUM",   # Yum! Brands
+        "DHI",   # D.R. Horton
+        "LEN",   # Lennar
+    ],
+
+    "Consommation_de_base": [
+        "WMT",   # Walmart
+        "COST",  # Costco
+        "PG",    # Procter & Gamble
+        "KO",    # Coca-Cola
+        "PEP",   # PepsiCo
+        "PM",    # Philip Morris
+        "MO",    # Altria
+        "MDLZ",  # Mondelez
+        "CL",    # Colgate-Palmolive
+        "KMB",   # Kimberly-Clark
+        "KHC",   # Kraft Heinz
+        "GIS",   # General Mills
+        "HSY",   # Hershey
+        "KR",    # Kroger
+        "SYY",   # Sysco
+        "ADM",   # Archer-Daniels-Midland
+        "TGT",   # Target
+        "STZ",   # Constellation Brands
+    ],
+}
+tickers = [ticker 
+           for liste_tickers in actions_par_secteur.values() 
+           for ticker in liste_tickers]
+
+
+# ==============================================================
+# 2. Téléchargement des données
+# ==============================================================
+
+brut = yf.download(
+    tickers=tickers,
+    start=DEBUT_HISTO,
+    auto_adjust=True,
+    progress=False,
+    group_by="column",
+)
+secteur_par_ticker = {
+    ticker: secteur
+    for secteur, liste_tickers in actions_par_secteur.items()
+    for ticker in liste_tickers
+}
+
+
+# ==============================================================
+# 3. Création d'un DataFrame OHLCV par secteur
+# ==============================================================
+
+#====== IMPORTANT====
+#prix_secteurs est un dico ou les keys sont les etf et les values open, high...
+
+prix_secteurs = {}
+
+if isinstance(brut.columns, pd.MultiIndex):
+
+    tickers_disponibles = (
+        brut.columns
+        .get_level_values(1)
+        .unique()
+    )
+
+    for ticker in tickers:
+
+        if ticker not in tickers_disponibles:
+            print(f"Ticker absent : {ticker}")
+            continue
+
+        ohlcv = (
+            brut
+            .xs(
+                ticker,
+                axis=1,
+                level=1,
+            )
+            .copy()
+        )
+
+        # Suppression uniquement des lignes sans cours.
+        ohlcv = ohlcv.dropna(
+            subset=[
+                "Open",
+                "High",
+                "Low",
+                "Close",
+            ]
+        )
+
+        if ohlcv.empty:
+            print(f"Aucune donnée valide : {ticker}")
+            continue
+
+        prix_secteurs[ticker] = ohlcv
+
+else:
+
+    # Cas où un seul ticker est téléchargé.
+    prix_secteurs[tickers[0]] = brut.dropna()
+
+
+print(
+    f"{len(prix_secteurs)} secteurs disponibles : "
+    f"{list(prix_secteurs.keys())}"
+)
+
+
+
+# ==============================================================
+# 4. Calcul des indicateurs
+# ==============================================================
+
+panels = construire_panels(
+    prix_secteurs,
+    Indicateurs,
+    ParamsPF(
+        min_titres=P.min_titres
+    ),
+    generateur=features_completes,
+)
+
+
+# ==============================================================
+# 5. Un DataFrame d'indicateurs par secteur
+# ==============================================================
+
+data_secteurs = {}
+
+for ticker in prix_secteurs:
+
+    colonnes_ticker = {}
+
+    for nom_indicateur, panel in panels.items():
+
+        if ticker in panel.columns:
+
+            colonnes_ticker[nom_indicateur] = (
+                panel[ticker]
+            )
+
+    data_ticker = pd.DataFrame(
+        colonnes_ticker
+    )
+
+    data_ticker.index = pd.to_datetime(
+        data_ticker.index
+    )
+
+    data_ticker = (
+        data_ticker
+        .sort_index()
+        .dropna(how="all")
+    )
+
+    data_secteurs[ticker] = data_ticker
+
+
+# ==============================================================
+# 6. Vérification
+# ==============================================================
+
+for ticker, data_ticker in data_secteurs.items():
+
+    print(
+        f"{ticker} : "
+        f"{len(data_ticker)} lignes, "
+        f"{len(data_ticker.columns)} indicateurs"
+    )
+
+    print(
+        data_ticker.columns.tolist())
+
+resultats = {}
+
+capital_initial = 100_000.0
 
 manquants = [
     nom
