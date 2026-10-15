@@ -1,0 +1,337 @@
+"""
+Étape 3 : préparation des données pour le modèle VSN + LSTM.
+
+Entrées attendues :
+  - prix journaliers yfinance (colonnes MultiIndex (champ, ticker) ou (ticker, champ))
+  - indicateurs techniques journaliers (MultiIndex en lignes ou en colonnes)
+  - score macro mensuel (CSV : une colonne date + une ou plusieurs colonnes de valeurs)
+
+Sortie : un DataFrame « long », indexé par (date, ticker), avec
+  - les variables explicatives normalisées,
+  - la cible,
+  - une colonne "split" (train / val / test).
+
+Règle d'or : à la date t, chaque ligne ne contient que de l'information
+réellement disponible à la clôture de t.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+import numpy as np
+import pandas as pd
+
+PRICE_FIELDS = {"Open", "High", "Low", "Close", "Adj Close", "Volume"}
+
+
+# ---------------------------------------------------------------------------
+# 1. Mise au format long (date, ticker)
+# ---------------------------------------------------------------------------
+def to_long(df: pd.DataFrame, field_level: int | None = None) -> pd.DataFrame:
+    """Convertit un DataFrame MultiIndex en format long indexé par (date, ticker).
+
+    Cas gérés :
+      - colonnes MultiIndex (champ, ticker) : format par défaut de yf.download
+      - colonnes MultiIndex (ticker, champ) : yf.download(..., group_by="ticker")
+      - lignes MultiIndex (date, ticker) ou (ticker, date)
+
+    field_level : niveau des colonnes qui contient les noms de champs (0 ou 1).
+                  Laisser None pour une détection automatique sur les champs OHLCV ;
+                  à préciser pour un DataFrame d'indicateurs en colonnes MultiIndex.
+    """
+    if isinstance(df.columns, pd.MultiIndex):
+        if field_level is None:
+            lvl0 = set(df.columns.get_level_values(0))
+            lvl1 = set(df.columns.get_level_values(1))
+            if lvl0 & PRICE_FIELDS:
+                field_level = 0
+            elif lvl1 & PRICE_FIELDS:
+                field_level = 1
+            else:
+                raise ValueError(
+                    "Impossible de deviner quel niveau de colonnes contient les champs : "
+                    "précisez field_level=0 ou field_level=1."
+                )
+        ticker_level = 1 - field_level
+        out = df.stack(level=ticker_level)
+        out.index = out.index.set_names(["date", "ticker"])
+    elif isinstance(df.index, pd.MultiIndex):
+        out = df.copy()
+        # le niveau date est celui dont les valeurs sont des dates
+        date_pos = next(
+            i for i in range(out.index.nlevels)
+            if pd.api.types.is_datetime64_any_dtype(out.index.get_level_values(i))
+        )
+        if date_pos != 0:
+            out = out.swaplevel(0, 1)
+        out.index = out.index.set_names(["date", "ticker"])
+    else:
+        raise ValueError("Le DataFrame doit avoir un MultiIndex en lignes ou en colonnes.")
+
+    out.columns.name = None
+    out = out.sort_index()
+    # dates sans heure ni fuseau, pour pouvoir fusionner proprement
+    dates = pd.to_datetime(out.index.get_level_values("date"))
+    if dates.tz is not None:
+        dates = dates.tz_localize(None)
+    out.index = pd.MultiIndex.from_arrays(
+        [dates.normalize(), out.index.get_level_values("ticker")], names=["date", "ticker"]
+    )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 2. Variables issues des prix + cible
+# ---------------------------------------------------------------------------
+def price_features(prices: pd.DataFrame, horizon: int = 1,
+                   target: str = "return") -> pd.DataFrame:
+    """Transforme les prix (non stationnaires) en variables stationnaires + cible.
+
+    prices : format long (date, ticker) avec au moins Close (ou Adj Close) et Volume.
+    horizon: h, la cible porte sur la période t -> t+h.
+    target : "return"    -> log(P_{t+h} / P_t)
+             "direction" -> 1 si ce rendement est positif, sinon 0
+
+    Les prix bruts NE sont PAS conservés comme variables : leur niveau dépend
+    de l'action et de l'époque, et le modèle s'en servirait mal.
+    """
+    close_col = "Adj Close" if "Adj Close" in prices.columns else "Close"
+    g = prices.groupby(level="ticker", group_keys=False)
+    log_close = np.log(prices[close_col])
+    lc = log_close.groupby(level="ticker", group_keys=False)
+
+    feats = pd.DataFrame(index=prices.index)
+    feats["ret_1d"] = lc.diff(1)
+    feats["ret_5d"] = lc.diff(5)
+    feats["ret_20d"] = lc.diff(20)
+    feats["vol_20d"] = feats["ret_1d"].groupby(level="ticker", group_keys=False) \
+        .apply(lambda s: s.rolling(20).std())
+    if "Volume" in prices.columns:
+        vol = prices["Volume"].replace(0, np.nan)
+        vol_ma = g["Volume"].apply(lambda s: s.replace(0, np.nan).rolling(20).mean())
+        feats["volume_rel"] = np.log(vol / vol_ma)          # volume du jour vs moyenne 20 j
+
+    # Cible : uniquement du futur, décalé de -h à l'intérieur de chaque ticker
+    fwd = lc.shift(-horizon) - log_close
+    feats["target"] = (fwd > 0).astype(float).where(fwd.notna()) if target == "direction" else fwd
+    return feats
+
+
+# ---------------------------------------------------------------------------
+# 3. Données macro mensuelles -> journalières, sans regarder le futur
+# ---------------------------------------------------------------------------
+def load_macro(path_or_df, date_col: str = "date", publication_lag_days: int = 30,
+               date_is_period_start: bool = True, add_changes: bool = True) -> pd.DataFrame:
+    """Charge un fichier macro mensuel et calcule sa date de disponibilité.
+
+    Le score du mois M n'est connu qu'après la fin de M, plus le délai de
+    publication des indicateurs qui le composent. On ne l'utilise qu'à partir
+    de : fin du mois M + publication_lag_days.
+
+    date_is_period_start : True si la date du CSV désigne le mois de référence
+                           (ex. 2024-03-01 pour le score de mars).
+                           False si la date est déjà la date de publication.
+    add_changes          : ajoute la variation d'un mois sur l'autre (suffixe _chg).
+    """
+    macro = pd.read_csv(path_or_df) if isinstance(path_or_df, str) else path_or_df.copy()
+    macro[date_col] = pd.to_datetime(macro[date_col])
+    macro = macro.sort_values(date_col).set_index(date_col)
+    macro = macro.select_dtypes("number")
+
+    if add_changes:
+        for c in list(macro.columns):
+            macro[f"{c}_chg"] = macro[c].diff()
+
+    if date_is_period_start:
+        month_end = macro.index.to_period("M").to_timestamp(how="end").normalize()
+        available = month_end + pd.Timedelta(days=publication_lag_days)
+    else:
+        available = macro.index
+    macro.index = pd.DatetimeIndex(available, name="available_date")
+    return macro
+
+
+def align_macro(dates: pd.DatetimeIndex, macro: pd.DataFrame) -> pd.DataFrame:
+    """Pour chaque date journalière, prend la dernière valeur macro DÉJÀ disponible."""
+    left = pd.DataFrame({"date": pd.DatetimeIndex(dates).unique().sort_values()})
+    right = macro.reset_index().rename(columns={"available_date": "macro_date"})
+    out = pd.merge_asof(left, right, left_on="date", right_on="macro_date",
+                        direction="backward")
+    return out.set_index("date").drop(columns="macro_date")
+
+
+# ---------------------------------------------------------------------------
+# 4. Découpage temporel et normalisation
+# ---------------------------------------------------------------------------
+@dataclass
+class Scaler:
+    """Moyennes et écarts-types appris sur la seule période d'entraînement."""
+    mean: pd.Series = field(default_factory=pd.Series)
+    std: pd.Series = field(default_factory=pd.Series)
+    clip: float = 5.0
+
+    def fit(self, df: pd.DataFrame) -> "Scaler":
+        self.mean = df.mean()
+        self.std = df.std().replace(0, 1.0)
+        return self
+
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        # z-score puis écrêtage à ±clip : limite l'effet des queues épaisses
+        return ((df - self.mean) / self.std).clip(-self.clip, self.clip)
+
+
+def time_split(dates: pd.DatetimeIndex, train_end: str, val_end: str,
+               horizon: int) -> pd.Series:
+    """Attribue train / val / test selon la date, avec une purge.
+
+    La cible d'une ligne datée t utilise le prix de t+h. Les h derniers jours
+    d'entraînement (et de validation) ont donc une cible qui « déborde » sur la
+    période suivante : on les retire (label "purge").
+    """
+    udates = pd.DatetimeIndex(dates).unique().sort_values()
+    split = pd.Series("test", index=udates)
+    split[udates <= pd.Timestamp(val_end)] = "val"
+    split[udates <= pd.Timestamp(train_end)] = "train"
+    for name in ("train", "val"):
+        last = split.index[split == name]
+        if len(last):
+            split[last[-horizon:]] = "purge"
+    return split
+
+
+# ---------------------------------------------------------------------------
+# 5. Pipeline complet
+# ---------------------------------------------------------------------------
+@dataclass
+class PreparedData:
+    df: pd.DataFrame            # index (date, ticker) ; features + "target" + "split"
+    feature_cols: list[str]
+    scaler: Scaler
+    tickers: list[str]
+
+
+def prepare_dataset(prices: pd.DataFrame,
+                    indicators: pd.DataFrame | None = None,
+                    macro: pd.DataFrame | None = None,
+                    train_end: str = "2019-12-31",
+                    val_end: str = "2021-12-31",
+                    horizon: int = 1,
+                    target: str = "return",
+                    indicator_field_level: int | None = None,
+                    scale_target: bool = False) -> PreparedData:
+    """Assemble prix, indicateurs et macro en un jeu de données propre.
+
+    prices     : sortie brute de yf.download (ou déjà au format long)
+    indicators : indicateurs techniques (MultiIndex en lignes ou colonnes)
+    macro      : sortie de load_macro
+    """
+    prices_long = prices if _is_long(prices) else to_long(prices)
+    data = price_features(prices_long, horizon=horizon, target=target)
+
+    if indicators is not None:
+        ind = indicators if _is_long(indicators) else to_long(indicators, indicator_field_level)
+        ind = ind.select_dtypes("number")
+        data = data.join(ind, how="left")
+
+    if macro is not None:
+        dates = data.index.get_level_values("date")
+        macro_daily = align_macro(dates, macro)
+        data = data.join(macro_daily, on="date")
+
+    # Nettoyage : lignes incomplètes (début des moyennes glissantes, fin de cible, etc.)
+    feature_cols = [c for c in data.columns if c != "target"]
+    data = data.replace([np.inf, -np.inf], np.nan).dropna(subset=feature_cols + ["target"])
+
+    # Découpage
+    split = time_split(data.index.get_level_values("date"), train_end, val_end, horizon)
+    data["split"] = split.reindex(data.index.get_level_values("date")).values
+    data = data[data["split"] != "purge"]
+
+    # Normalisation apprise sur le train uniquement
+    train = data["split"] == "train"
+    scale_cols = feature_cols + (["target"] if scale_target and target == "return" else [])
+    scaler = Scaler().fit(data.loc[train, scale_cols])
+    data[scale_cols] = scaler.transform(data[scale_cols])
+
+    tickers = sorted(data.index.get_level_values("ticker").unique())
+    return PreparedData(df=data, feature_cols=feature_cols, scaler=scaler, tickers=tickers)
+
+
+def _is_long(df: pd.DataFrame) -> bool:
+    return isinstance(df.index, pd.MultiIndex) and list(df.index.names) == ["date", "ticker"]
+
+
+def ticker_onehot(tickers: list[str]) -> pd.DataFrame:
+    """Variables statiques simples pour un panel : un indicateur 0/1 par ticker."""
+    return pd.DataFrame(np.eye(len(tickers)), index=tickers, columns=tickers)
+
+
+# ---------------------------------------------------------------------------
+# Tests sur des données simulées au format yfinance : python data_prep.py
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    rng = np.random.default_rng(0)
+    dates = pd.bdate_range("2015-01-01", "2024-12-31")
+    tickers = ["AAA", "BBB", "CCC"]
+
+    # Prix au format yf.download : colonnes (champ, ticker)
+    cols = pd.MultiIndex.from_product([["Close", "High", "Low", "Open", "Volume"], tickers],
+                                      names=["Price", "Ticker"])
+    raw = pd.DataFrame(index=pd.DatetimeIndex(dates, name="Date"), columns=cols, dtype=float)
+    for t in tickers:
+        close = 100 * np.exp(np.cumsum(rng.normal(0, 0.01, len(dates))))
+        raw[("Close", t)] = close
+        raw[("High", t)] = close * 1.01
+        raw[("Low", t)] = close * 0.99
+        raw[("Open", t)] = close
+        raw[("Volume", t)] = rng.integers(1e5, 1e6, len(dates))
+    raw.iloc[:50, raw.columns.get_loc(("Close", "CCC"))] = np.nan     # introduction tardive
+
+    # Indicateurs en lignes MultiIndex (Date, Ticker)
+    idx = pd.MultiIndex.from_product([dates, tickers], names=["Date", "Ticker"])
+    indicators = pd.DataFrame({"RSI": rng.uniform(0, 100, len(idx)),
+                               "BB_pct": rng.normal(0.5, 0.3, len(idx)),
+                               "Stoch_slow": rng.uniform(0, 100, len(idx))}, index=idx)
+
+    # Score macro mensuel : la date = début du mois de référence
+    months = pd.date_range("2014-06-01", "2024-12-01", freq="MS")
+    macro_csv = pd.DataFrame({"date": months, "macro_score": rng.normal(0, 1, len(months))})
+    macro = load_macro(macro_csv, publication_lag_days=30)
+
+    pdata = prepare_dataset(raw, indicators, macro,
+                            train_end="2020-12-31", val_end="2022-12-31", horizon=1)
+    df = pdata.df
+
+    # 1. Plus aucune valeur manquante, colonnes attendues
+    assert not df[pdata.feature_cols + ["target"]].isna().any().any()
+    assert {"ret_1d", "vol_20d", "RSI", "macro_score", "macro_score_chg"} <= set(df.columns)
+    assert "Close" not in df.columns
+
+    # 2. Macro sans fuite : la valeur utilisée le 2023-03-15 est celle de janvier 2023
+    #    (fin janvier + 30 jours = 2 mars <= 15 mars ; février n'est dispo que le 30 mars)
+    jan = macro_csv.loc[macro_csv.date == "2023-01-01", "macro_score"].item()
+    row = df.loc[(pd.Timestamp("2023-03-15"), "AAA")]
+    expected = (jan - pdata.scaler.mean["macro_score"]) / pdata.scaler.std["macro_score"]
+    assert abs(row["macro_score"] - expected) < 1e-9
+
+    # 3. Cible = log-rendement du lendemain (vérifiée sur une ligne avant normalisation)
+    long_prices = to_long(raw)
+    c = long_prices["Close"].xs("AAA", level="ticker")
+    d0 = pd.Timestamp("2021-06-01")
+    d1 = c.index[c.index.get_loc(d0) + 1]
+    assert abs(df.loc[(d0, "AAA"), "target"] - np.log(c[d1] / c[d0])) < 1e-12
+
+    # 4. Normalisation apprise sur le train : moyenne ~0 et écart-type ~1 sur le train
+    tr = df[df.split == "train"][pdata.feature_cols]
+    assert tr.mean().abs().max() < 0.05 and (tr.std() - 1).abs().max() < 0.05
+
+    # 5. Pas de chevauchement de dates entre périodes, purge appliquée
+    last_train = df[df.split == "train"].index.get_level_values("date").max()
+    first_val = df[df.split == "val"].index.get_level_values("date").min()
+    assert last_train < pd.Timestamp("2020-12-31") < first_val
+
+    print("Étape 3 OK.")
+    print(f"  {len(df):,} lignes, {len(pdata.feature_cols)} variables : {pdata.feature_cols}")
+    print("  " + df["split"].value_counts().to_string().replace("\n", " | "))
+    print(f"  dernier jour train : {last_train.date()}, premier jour val : {first_val.date()}")
