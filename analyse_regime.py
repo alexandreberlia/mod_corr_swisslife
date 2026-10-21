@@ -26,73 +26,14 @@ import os
 import numpy as np
 import pandas as pd
 
-from data_prep import align_macro, indicators_to_long, load_macro, to_long
+from data_prep import align_macro, indicators_to_long, load_macro, read_macro_table, to_long
 
-# ---------------------------------------------------------------------------
-# Vos règles de lecture. Adaptez "col" aux noms de colonnes de votre DataFrame.
-#   cross     : "up" = franchissement à la hausse, "down" = à la baisse
-#   sens      : +1 = signal de hausse du titre, -1 = signal de baisse
-#   condition : condition supplémentaire sur le cours (optionnelle)
-# ---------------------------------------------------------------------------
-SIGNAUX = [
-    {"nom": "RSI ↑45",        "col": "RSI",        "seuil": 45,     "cross": "up",   "sens": +1},
-    {"nom": "RSI ↓65",        "col": "RSI",        "seuil": 65,     "cross": "down", "sens": -1},
-    {"nom": "BB% ↑0",         "col": "BB_pct",     "seuil": 0.0,    "cross": "up",   "sens": +1},
-    {"nom": "BB% ↓0,95",      "col": "BB_pct",     "seuil": 0.95,   "cross": "down", "sens": -1},
-    {"nom": "rev_5 ↑0,03",    "col": "rev_5",      "seuil": 0.03,   "cross": "up",   "sens": +1},
-    {"nom": "rev_5 ↓-0,025",  "col": "rev_5",      "seuil": -0.025, "cross": "down", "sens": -1},
-    {"nom": "Stoch ↑15",      "col": "stoch_long", "seuil": 15,     "cross": "up",   "sens": +1},
-    {"nom": "Stoch ↓75",      "col": "stoch_long", "seuil": 75,     "cross": "down", "sens": -1},
-    {"nom": "MACD hist ↑-2,5", "col": "MACD_hist", "seuil": -2.5,   "cross": "up",   "sens": +1},
-    {"nom": "MACD hist ↓2,5", "col": "MACD_hist",  "seuil": 2.5,    "cross": "down", "sens": -1},
-    {"nom": "ER ↑0,35 & cours > J-10", "col": "ER", "seuil": 0.35,  "cross": "up",   "sens": +1,
-     "condition": "cours_sup_j10"},
-    {"nom": "ER ↓0,35 & cours < J-10", "col": "ER", "seuil": 0.35,  "cross": "down", "sens": -1,
-     "condition": "cours_inf_j10"},
-]
+# Les règles (SIGNAUX), l'horizon et les seuils de régime sont dans signaux.py,
+# partagé avec le modèle : modifiez-les là-bas.
+from signaux import (HORIZON, SEUIL_BAS, SEUIL_HAUT, SIGNAUX,  # noqa: E402,F401
+                     calcul_signaux, franchissement, regime)
 
-HORIZON = 4            # séances
-SEUIL_BAS, SEUIL_HAUT = 25, 75
 N_MIN = 30             # en dessous, un taux de réussite n'est pas interprétable
-
-
-# ---------------------------------------------------------------------------
-# Briques
-# ---------------------------------------------------------------------------
-def franchissement(s: pd.Series, seuil: float, sens: str) -> pd.Series:
-    """True le jour où la série franchit le seuil. s : indexée (date, ticker).
-
-    hausse : valeur de la veille < seuil <= valeur du jour
-    baisse : valeur de la veille > seuil >= valeur du jour
-    La veille est prise à l'intérieur de chaque ticker (jamais d'un titre à l'autre).
-    """
-    veille = s.groupby(level="ticker").shift(1)
-    if sens == "up":
-        return (veille < seuil) & (s >= seuil)
-    return (veille > seuil) & (s <= seuil)
-
-
-def calcul_signaux(df: pd.DataFrame, signaux: list[dict] = SIGNAUX) -> pd.DataFrame:
-    """Une colonne booléenne par signal. df : (date, ticker), avec "Close" et les indicateurs."""
-    close = df["Close"]
-    close_j10 = close.groupby(level="ticker").shift(10)
-    conditions = {"cours_sup_j10": close > close_j10, "cours_inf_j10": close < close_j10}
-
-    out = pd.DataFrame(index=df.index)
-    for sig in signaux:
-        if sig["col"] not in df.columns:
-            print(f"  (colonne {sig['col']!r} absente : signal {sig['nom']!r} ignoré)")
-            continue
-        ev = franchissement(df[sig["col"]], sig["seuil"], sig["cross"])
-        if sig.get("condition"):
-            ev &= conditions[sig["condition"]]
-        out[sig["nom"]] = ev.fillna(False)
-    return out
-
-
-def regime(score: pd.Series, bas: float = SEUIL_BAS, haut: float = SEUIL_HAUT) -> pd.Series:
-    return pd.Series(np.select([score < bas, score > haut], ["bas", "élevé"], "neutre"),
-                     index=score.index).where(score.notna())
 
 
 def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
@@ -140,6 +81,10 @@ def analyse(prices: pd.DataFrame, indicators: pd.DataFrame, macro_csv,
     dates = df.index.get_level_values("date")
     keep = (dates >= pd.Timestamp(start)) & (dates <= pd.Timestamp(end)) \
         & df["hausse_4j"].notna() & df["regime"].notna()
+    if keep.sum() == 0:
+        raise ValueError("Aucune ligne exploitable : prix, indicateurs et score ne se recoupent "
+                         "pas sur la période. Lancez diagnostic(prices, panels, fichier_macro, "
+                         "score_col=...) pour voir à quelle étape les données disparaissent.")
     df, sig = df[keep], sig[keep]
 
     # Fréquences de référence par régime
@@ -216,6 +161,112 @@ def analyse(prices: pd.DataFrame, indicators: pd.DataFrame, macro_csv,
     if out_dir:
         _export(res, out_dir)
     return res
+
+
+def diagnostic(prices, indicators, macro_csv, score_col: str = "score",
+               date_col: str = "date", start: str = "2005-01-01",
+               end: str = "2018-12-31", publication_lag_days: int = 30) -> None:
+    """Vérifie chaque étape de la préparation et indique où les données disparaissent."""
+    ok = True
+
+    def titre(t):
+        print(f"\n=== {t} ===")
+
+    def alerte(msg):
+        nonlocal ok
+        ok = False
+        print("  !! " + msg)
+
+    # 1. Prix
+    titre("1. Prix")
+    px = to_long(prices)
+    tk_px = set(px.index.get_level_values("ticker"))
+    d_px = px.index.get_level_values("date")
+    print(f"  {len(tk_px)} titres, du {d_px.min().date()} au {d_px.max().date()}")
+    print(f"  colonnes : {list(px.columns)}")
+    print(f"  exemples de titres : {sorted(map(str, tk_px))[:5]}")
+    if not {"Close", "Adj Close"} & set(px.columns):
+        alerte("pas de colonne Close / Adj Close dans les prix.")
+
+    # 2. Indicateurs
+    titre("2. Indicateurs")
+    ind = indicators_to_long(indicators, list(tk_px))
+    tk_ind = set(ind.index.get_level_values("ticker"))
+    d_ind = ind.index.get_level_values("date")
+    print(f"  {len(tk_ind)} titres, du {d_ind.min().date()} au {d_ind.max().date()}")
+    print(f"  indicateurs : {list(ind.columns)}")
+    print(f"  exemples de titres : {sorted(map(str, tk_ind))[:5]}")
+    print("  part de valeurs manquantes :",
+          ", ".join(f"{c} {ind[c].isna().mean():.0%}" for c in ind.columns))
+    non_num = [c for c in ind.columns if not pd.api.types.is_numeric_dtype(ind[c])]
+    if non_num:
+        alerte(f"indicateurs non numériques (ignorés) : {non_num}")
+    attendus = {s["col"] for s in SIGNAUX}
+    manquants = attendus - set(ind.columns)
+    if manquants:
+        alerte(f"indicateurs attendus par SIGNAUX mais absents : {sorted(manquants)} "
+               "-> corrigez les noms dans la liste SIGNAUX.")
+
+    # 3. Recoupement prix / indicateurs
+    titre("3. Recoupement prix x indicateurs")
+    communs = tk_px & tk_ind
+    print(f"  titres communs : {len(communs)} / prix {len(tk_px)} / indicateurs {len(tk_ind)}")
+    if not communs:
+        alerte("aucun titre en commun : les noms diffèrent entre prices et panels "
+               f"(ex. {sorted(map(str, tk_px))[:2]} contre {sorted(map(str, tk_ind))[:2]}).")
+    joint = ind.join(px[[]], how="inner")
+    print(f"  lignes (date, titre) communes : {len(joint):,}")
+    if communs and len(joint) == 0:
+        alerte("titres communs mais aucune date commune : vérifiez le format des dates "
+               f"(prix : {d_px[:1].tolist()}, indicateurs : {d_ind[:1].tolist()}).")
+
+    # 4. Score macro
+    titre("4. Score macro")
+    try:
+        raw = read_macro_table(macro_csv, date_col)
+    except Exception as e:
+        alerte(str(e))
+        print("\nDiagnostic interrompu.")
+        return
+    print(f"  colonnes lues : {list(raw.columns)}")
+    print(raw.head(3).to_string())
+    if score_col not in raw.columns:
+        alerte(f"colonne {score_col!r} absente -> précisez score_col=... parmi {list(raw.columns)}")
+        print("\nDiagnostic interrompu.")
+        return
+    sc = raw[score_col]
+    if not pd.api.types.is_numeric_dtype(sc):
+        alerte(f"la colonne {score_col!r} n'est pas numérique (exemples : {sc.head(3).tolist()}).")
+        print("\nDiagnostic interrompu.")
+        return
+    else:
+        print(f"  {score_col} : de {sc.min():.2f} à {sc.max():.2f}, "
+              f"du {raw[date_col].min().date()} au {raw[date_col].max().date()}")
+        if sc.max() <= 1:
+            alerte("le score semble compris entre 0 et 1 : avec des seuils à 25 et 75, "
+                   "tout tombera dans le régime « bas ». Multipliez par 100 ou changez "
+                   "SEUIL_BAS / SEUIL_HAUT.")
+
+    # 5. Score sur la période d'analyse
+    titre(f"5. Score sur {start} -> {end}")
+    macro = load_macro(raw, date_col=date_col, publication_lag_days=publication_lag_days,
+                       add_changes=False)
+    dates = joint.index.get_level_values("date")
+    dates = dates[(dates >= pd.Timestamp(start)) & (dates <= pd.Timestamp(end))]
+    if len(dates) == 0:
+        alerte(f"aucune donnée prix x indicateurs entre {start} et {end}.")
+    else:
+        al = align_macro(dates, macro[[score_col]])[score_col]
+        print(f"  jours de bourse avec un score disponible : {al.notna().mean():.0%}")
+        if al.notna().mean() == 0:
+            alerte("aucun score disponible sur la période : le fichier macro commence-t-il "
+                   "avant la période (en tenant compte du délai de publication) ?")
+        else:
+            print("  répartition des régimes (en jours) :",
+                  regime(al).value_counts().to_dict())
+
+    print("\nTout semble cohérent." if ok else "\nCorrigez les points marqués « !! » "
+          "puis relancez analyse(...).")
 
 
 def _export(res: dict, out_dir: str) -> None:
