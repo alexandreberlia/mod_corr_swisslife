@@ -17,6 +17,7 @@ réellement disponible à la clôture de t.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -236,8 +237,7 @@ def load_macro(path_or_df, date_col: str = "date", publication_lag_days: int = 3
                            False si la date est déjà la date de publication.
     add_changes          : ajoute la variation d'un mois sur l'autre (suffixe _chg).
     """
-    macro = pd.read_csv(path_or_df) if isinstance(path_or_df, str) else path_or_df.copy()
-    macro[date_col] = pd.to_datetime(macro[date_col])
+    macro = read_macro_table(path_or_df, date_col)
     macro = macro.sort_values(date_col).set_index(date_col)
     macro = macro.select_dtypes("number")
 
@@ -251,6 +251,39 @@ def load_macro(path_or_df, date_col: str = "date", publication_lag_days: int = 3
     else:
         available = macro.index
     macro.index = pd.DatetimeIndex(available, name="available_date")
+    return macro
+
+
+def read_macro_table(path_or_df, date_col: str = "date") -> pd.DataFrame:
+    """Lit le CSV macro de façon tolérante aux formats français.
+
+    - séparateur détecté automatiquement (« , » ou « ; ») ;
+    - décimales avec virgule (« 45,3 ») converties en nombres ;
+    - dates « 31/01/2010 » lues jour/mois/année ;
+    - date en index plutôt qu'en colonne acceptée.
+    """
+    if isinstance(path_or_df, (str, os.PathLike)):
+        macro = pd.read_csv(path_or_df, sep=None, engine="python")
+    else:
+        macro = path_or_df.copy()
+    macro.columns = [str(c).strip() for c in macro.columns]
+    if date_col not in macro.columns:
+        if isinstance(macro.index, pd.DatetimeIndex) or macro.index.name == date_col:
+            macro = macro.reset_index().rename(columns={macro.index.name or "index": date_col})
+        else:
+            raise ValueError(f"Colonne date {date_col!r} introuvable. Colonnes du fichier : "
+                             f"{list(macro.columns)} -> précisez date_col=...")
+    raw = macro[date_col]
+    dayfirst = (not pd.api.types.is_datetime64_any_dtype(raw)
+                and raw.astype(str).str.contains("/").any())
+    macro[date_col] = pd.to_datetime(raw, dayfirst=bool(dayfirst))
+    for c in macro.columns:
+        if c != date_col and not pd.api.types.is_numeric_dtype(macro[c]):
+            conv = pd.to_numeric(macro[c].astype(str).str.replace(",", ".", regex=False)
+                                 .str.replace(" ", "", regex=False).str.strip(),
+                                 errors="coerce")
+            if conv.notna().mean() > 0.8:
+                macro[c] = conv
     return macro
 
 
@@ -313,14 +346,16 @@ def time_split(dates: pd.DatetimeIndex, train_end: str, val_end: str,
 # ---------------------------------------------------------------------------
 @dataclass
 class PreparedData:
-    df: pd.DataFrame            # index (date, ticker) ; features + "target" + "split"
-    feature_cols: list[str]
+    df: pd.DataFrame            # index (date, ticker) ; features + régime + "target" + "split"
+    feature_cols: list[str]     # variables lues par le VSN
     scaler: Scaler
     tickers: list[str]
+    regime_cols: list[str] = field(default_factory=list)   # contexte (score macro)
+    signal_cols: list[str] = field(default_factory=list)   # variables de franchissement
 
 
-def prepare_dataset(prices: pd.DataFrame,
-                    indicators: pd.DataFrame | None = None,
+def prepare_dataset(prices,
+                    indicators=None,
                     macro: pd.DataFrame | None = None,
                     train_start: str | None = None,
                     train_end: str = "2019-12-31",
@@ -328,30 +363,88 @@ def prepare_dataset(prices: pd.DataFrame,
                     horizon: int = 1,
                     target: str = "return",
                     indicator_field_level: int | None = None,
-                    scale_target: bool = False) -> PreparedData:
+                    scale_target: bool = False,
+                    signaux: list[dict] | bool | None = None,
+                    garder_niveaux: bool = False,
+                    demi_vie: float = 2.0,
+                    max_jours: int = 10,
+                    regime_col: str | None = None,
+                    seuils_regime: tuple[float, float] | None = None,
+                    variables_prix: bool = True) -> PreparedData:
     """Assemble prix, indicateurs et macro en un jeu de données propre.
 
-    prices     : sortie brute de yf.download (ou déjà au format long)
-    indicators : indicateurs techniques (MultiIndex en lignes ou colonnes)
+    prices     : yf.download, dictionnaire {titre: DataFrame}, ou format long
+    indicators : dictionnaire `panels` ou DataFrame MultiIndex
     macro      : sortie de load_macro
+
+    Règles de décision (franchissements) :
+      signaux        : True pour utiliser la liste SIGNAUX de signaux.py (ou une liste à vous).
+                       Chaque signal devient une variable « fraîcheur » : 1 le jour du
+                       franchissement, puis décroissante (demi_vie), 0 après max_jours.
+      garder_niveaux : False (défaut) = les indicateurs bruts (RSI = 52...) sont retirés,
+                       le modèle ne voit que les règles. True = il voit les deux.
+
+    Score macro comme régime (contexte) plutôt que comme variable :
+      regime_col     : nom de la colonne du score (ex. "score"). Toutes les colonnes macro
+                       passent alors en contexte : elles ne sont plus lues par le VSN comme
+                       une variable, elles modifient la lecture des autres variables.
+      seuils_regime  : (25, 75) par défaut : ajoute deux indicatrices 0/1, régime bas et élevé.
+
+    variables_prix : False pour retirer les rendements / volatilité calculés sur les prix.
     """
+    from signaux import SEUIL_BAS, SEUIL_HAUT, SIGNAUX, calcul_signaux, memoire_signaux
+
     prices_long = prices if _is_long(prices) else to_long(prices)
     data = price_features(prices_long, horizon=horizon, target=target)
+    if not variables_prix:
+        data = data[["target"]]
+    no_scale: list[str] = []
+    signal_cols: list[str] = []
 
     if indicators is not None:
         tickers = prices_long.index.get_level_values("ticker").unique()
         ind = indicators_to_long(indicators, tickers, indicator_field_level)
         ind = ind.select_dtypes("number")
-        data = data.join(ind, how="left")
 
+        if signaux:
+            liste = SIGNAUX if signaux is True else signaux
+            close_col = "Adj Close" if "Adj Close" in prices_long.columns else "Close"
+            base = ind.join(prices_long[[close_col]].rename(columns={close_col: "Close"}),
+                            how="inner")
+            ev = calcul_signaux(base, liste, par="id")
+            mem = memoire_signaux(ev, demi_vie=demi_vie, max_jours=max_jours)
+            mem.columns = [f"sig_{c}" for c in mem.columns]
+            signal_cols = list(mem.columns)
+            no_scale += signal_cols          # déjà entre 0 et 1 : pas de normalisation
+            data = data.join(mem, how="left")
+            if garder_niveaux:
+                data = data.join(ind, how="left")
+        else:
+            data = data.join(ind, how="left")
+
+    regime_cols: list[str] = []
     if macro is not None:
         dates = data.index.get_level_values("date")
         macro_daily = align_macro(dates, macro)
         data = data.join(macro_daily, on="date")
+        if regime_col is not None:
+            if regime_col not in macro_daily.columns:
+                raise ValueError(f"regime_col={regime_col!r} absent des colonnes macro "
+                                 f"{list(macro_daily.columns)}")
+            regime_cols = list(macro_daily.columns)
+            bas, haut = seuils_regime or (SEUIL_BAS, SEUIL_HAUT)
+            sc = data[regime_col]
+            data["regime_bas"] = (sc < bas).astype(float).where(sc.notna())
+            data["regime_eleve"] = (sc > haut).astype(float).where(sc.notna())
+            regime_cols += ["regime_bas", "regime_eleve"]
+            no_scale += ["regime_bas", "regime_eleve"]
 
     # Nettoyage : lignes incomplètes (début des moyennes glissantes, fin de cible, etc.)
-    feature_cols = [c for c in data.columns if c != "target"]
-    data = data.replace([np.inf, -np.inf], np.nan).dropna(subset=feature_cols + ["target"])
+    feature_cols = [c for c in data.columns if c != "target" and c not in regime_cols]
+    if signal_cols:
+        data[signal_cols] = data[signal_cols].fillna(0.0)
+    data = data.replace([np.inf, -np.inf], np.nan) \
+        .dropna(subset=feature_cols + regime_cols + ["target"])
 
     # Découpage
     split = time_split(data.index.get_level_values("date"), train_end, val_end, horizon,
@@ -363,12 +456,14 @@ def prepare_dataset(prices: pd.DataFrame,
 
     # Normalisation apprise sur le train uniquement
     train = data["split"] == "train"
-    scale_cols = feature_cols + (["target"] if scale_target and target == "return" else [])
+    scale_cols = [c for c in feature_cols + regime_cols if c not in no_scale] \
+        + (["target"] if scale_target and target == "return" else [])
     scaler = Scaler().fit(data.loc[train, scale_cols])
     data[scale_cols] = scaler.transform(data[scale_cols])
 
     tickers = sorted(data.index.get_level_values("ticker").unique())
-    return PreparedData(df=data, feature_cols=feature_cols, scaler=scaler, tickers=tickers)
+    return PreparedData(df=data, feature_cols=feature_cols, scaler=scaler, tickers=tickers,
+                        regime_cols=regime_cols, signal_cols=signal_cols)
 
 
 def _is_long(df) -> bool:
