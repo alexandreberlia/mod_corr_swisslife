@@ -370,7 +370,11 @@ def prepare_dataset(prices,
                     max_jours: int = 10,
                     regime_col: str | None = None,
                     seuils_regime: tuple[float, float] | None = None,
-                    variables_prix: bool = True) -> PreparedData:
+                    variables_prix: bool = True,
+                    score_min: float | None = None,
+                    score_max: float | None = None,
+                    score_col: str | None = None,
+                    filtre_sur: tuple[str, ...] = ("train", "val", "test", "live")) -> PreparedData:
     """Assemble prix, indicateurs et macro en un jeu de données propre.
 
     prices     : yf.download, dictionnaire {titre: DataFrame}, ou format long
@@ -391,6 +395,15 @@ def prepare_dataset(prices,
       seuils_regime  : (25, 75) par défaut : ajoute deux indicatrices 0/1, régime bas et élevé.
 
     variables_prix : False pour retirer les rendements / volatilité calculés sur les prix.
+
+    Restreindre le modèle à certains niveaux du score :
+      score_min / score_max : seuls les jours où score > score_min (et < score_max)
+                       servent de points d'apprentissage et d'évaluation. Les autres jours
+                       sont étiquetés "hors_score" : ils restent dans l'historique des
+                       fenêtres, mais le modèle n'apprend ni ne prédit jamais à ces dates.
+      score_col      : colonne du score (par défaut regime_col)
+      filtre_sur     : périodes concernées ; par défaut les trois, pour évaluer le modèle
+                       uniquement sur le domaine où il a été entraîné.
     """
     from signaux import SEUIL_BAS, SEUIL_HAUT, SIGNAUX, calcul_signaux, memoire_signaux
 
@@ -406,12 +419,32 @@ def prepare_dataset(prices,
         ind = indicators_to_long(indicators, tickers, indicator_field_level)
         ind = ind.select_dtypes("number")
 
+        # Garde-fou : prix et indicateurs doivent porter les mêmes noms de titres
+        t_px = set(map(str, tickers))
+        t_ind = set(map(str, ind.index.get_level_values("ticker").unique()))
+        communs = t_px & t_ind
+        if not communs:
+            raise ValueError(
+                "Aucun titre en commun entre les prix et les indicateurs.\n"
+                f"  prix        : {sorted(t_px)[:5]}\n  indicateurs : {sorted(t_ind)[:5]}\n"
+                "Harmonisez les noms (clés de prices = colonnes des DataFrames de panels).")
+        if len(communs) < len(t_px):
+            print(f"Attention : {len(t_px) - len(communs)} titre(s) des prix sans indicateurs "
+                  f"(ex. {sorted(t_px - t_ind)[:5]}) ; ils n'auront aucun signal.")
+
         if signaux:
             liste = SIGNAUX if signaux is True else signaux
             close_col = "Adj Close" if "Adj Close" in prices_long.columns else "Close"
             base = ind.join(prices_long[[close_col]].rename(columns={close_col: "Close"}),
                             how="inner")
             ev = calcul_signaux(base, liste, par="id")
+            if ev.shape[1] == 0:
+                raise ValueError("Aucun signal calculable : les noms d'indicateurs de signaux.py "
+                                 f"(champ 'col') ne correspondent pas à {list(ind.columns)}.")
+            jamais = [c for c in ev.columns if not ev[c].any()]
+            if jamais:
+                print(f"Attention : signal(aux) jamais déclenché(s) : {jamais}. "
+                      "Vérifiez le seuil et l'échelle de l'indicateur (ex. 0-1 ou 0-100).")
             mem = memoire_signaux(ev, demi_vie=demi_vie, max_jours=max_jours)
             mem.columns = [f"sig_{c}" for c in mem.columns]
             signal_cols = list(mem.columns)
@@ -444,15 +477,32 @@ def prepare_dataset(prices,
     if signal_cols:
         data[signal_cols] = data[signal_cols].fillna(0.0)
     data = data.replace([np.inf, -np.inf], np.nan) \
-        .dropna(subset=feature_cols + regime_cols + ["target"])
+        .dropna(subset=feature_cols + regime_cols)
 
     # Découpage
     split = time_split(data.index.get_level_values("date"), train_end, val_end, horizon,
                        train_start=train_start)
     data["split"] = split.reindex(data.index.get_level_values("date")).values
+    # Lignes dont le futur n'est pas encore connu (les `horizon` dernières séances) :
+    # étiquetées "live". Jamais utilisées pour apprendre ni évaluer, elles servent à
+    # produire les décisions du jour (decision.py).
+    data.loc[data["target"].isna(), "split"] = "live"
     # Les lignes "purge" sont gardées : leurs variables restent utilisables comme
     # historique dans les fenêtres de la période suivante. Seule leur cible est
     # exclue (elles ne servent jamais de point de prédiction, cf. étape 4).
+
+    # Filtre sur le niveau du score (valeurs brutes, avant normalisation)
+    if score_min is not None or score_max is not None:
+        col = score_col or regime_col
+        if col is None or col not in data.columns:
+            raise ValueError("Pour filtrer sur le score, précisez score_col=... (ou regime_col=...). "
+                             f"Colonnes disponibles : {list(data.columns)}")
+        hors = pd.Series(False, index=data.index)
+        if score_min is not None:
+            hors |= ~(data[col] > score_min)
+        if score_max is not None:
+            hors |= ~(data[col] < score_max)
+        data.loc[hors & data["split"].isin(filtre_sur), "split"] = "hors_score"
 
     # Normalisation apprise sur le train uniquement
     train = data["split"] == "train"
@@ -512,8 +562,10 @@ if __name__ == "__main__":
                             train_end="2020-12-31", val_end="2022-12-31", horizon=1)
     df = pdata.df
 
-    # 1. Plus aucune valeur manquante, colonnes attendues
-    assert not df[pdata.feature_cols + ["target"]].isna().any().any()
+    # 1. Plus aucune valeur manquante (hors lignes "live", dont le futur est inconnu)
+    hist = df[df["split"] != "live"]
+    assert not hist[pdata.feature_cols + ["target"]].isna().any().any()
+    assert (df.loc[df["split"] == "live", "target"].isna()).all()
     assert {"ret_1d", "vol_20d", "RSI", "macro_score", "macro_score_chg"} <= set(df.columns)
     assert "Close" not in df.columns
 
