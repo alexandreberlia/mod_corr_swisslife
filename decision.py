@@ -70,28 +70,49 @@ def poids_portefeuille(decision: pd.DataFrame, horizon: int) -> pd.DataFrame:
 
 def backtest(pred: pd.DataFrame, rets: pd.DataFrame, seuil_achat: float,
              seuil_vente: float | None = None, horizon: int = 4,
-             couts_bps: float = 10.0, max_positions: int | None = None) -> dict:
+             couts_bps: float = 10.0, max_positions: int | None = None,
+             stop_atr: float | None = None, prices=None, atr: pd.DataFrame | None = None,
+             stop_sur: str = "low") -> dict:
     """Rejoue la stratégie sur la période couverte par `pred` (sortie de predict()).
 
     couts_bps : frais + écart achat/vente, en points de base par aller simple
                 (10 = 0,10 % à chaque achat et à chaque vente).
+
+    Stop de protection (optionnel) :
+      stop_atr : distance du stop en multiples d'ATR, ex. 2. Pour un achat au cours P,
+                 stop = P - 2 x ATR du jour d'achat (fixe pendant toute la détention).
+                 Pour une vente à découvert : P + 2 x ATR.
+      prices   : votre dictionnaire de prix (Open/High/Low/Close), obligatoire avec un stop
+      atr      : DataFrame dates x titres de l'ATR (calculé avec votre fonction) ;
+                 None = ATR 14 jours de Wilder calculé ici
+      stop_sur : "low" (défaut) = déclenché si le plus bas du jour touche le stop ;
+                 sortie au stop, ou à l'ouverture si elle est déjà sous le stop (gap).
+                 "close" = déclenché seulement si la clôture passe sous le stop ;
+                 sortie à cette clôture.
     """
     dec = selection(pred, seuil_achat, seuil_vente, max_positions)
     dates = rets.index[(rets.index >= dec.index.min()) & (rets.index <= dec.index.max())]
     dec = dec.reindex(index=dates, columns=rets.columns).fillna(0)
-    w = poids_portefeuille(dec, horizon)
-
     r = rets.reindex(index=dates)
+
+    # Référence : tous les titres de l'univers à parts égales, toujours investi
+    eligibles = pred["proba"].unstack("ticker").reindex(index=dates, columns=rets.columns).notna()
+    reference = r.where(eligibles.cumsum() > 0).mean(axis=1).fillna(0.0)
+
+    if stop_atr is not None:
+        if prices is None:
+            raise ValueError("Avec un stop, passez aussi prices=... (pour les plus bas et l'ATR).")
+        res = _backtest_stop(dec, prices, atr, horizon, stop_atr, couts_bps, stop_sur)
+        res.update({"reference": reference, "decisions": dec})
+        res["stats"] = statistiques(res, horizon)
+        return res
+
+    w = poids_portefeuille(dec, horizon)
     # Position prise à la clôture de t -> rendement du jour t+1
     brut = (w.shift(1) * r).sum(axis=1, min_count=1).fillna(0.0)
     rotation = w.diff().abs().sum(axis=1).fillna(w.abs().sum(axis=1))
     frais = (rotation * couts_bps / 1e4).shift(1).fillna(0.0)
     net = brut - frais
-
-    # Référence : tous les titres de l'univers à parts égales, toujours investi
-    eligibles = pred["proba"].unstack("ticker").reindex(index=dates, columns=rets.columns).notna()
-    univers = r.where(eligibles.cumsum() > 0)                 # titres une fois entrés dans l'univers
-    reference = univers.mean(axis=1).fillna(0.0)
 
     # Détail des trades : rendement sur les H séances qui suivent la décision
     fwd = (1 + r).rolling(horizon).apply(np.prod, raw=True).shift(-horizon) - 1
@@ -110,6 +131,113 @@ def backtest(pred: pd.DataFrame, rets: pd.DataFrame, seuil_achat: float,
            "poids": w, "decisions": dec, "trades": trades}
     res["stats"] = statistiques(res, horizon)
     return res
+
+
+def ohlc(prices) -> dict[str, pd.DataFrame]:
+    """Open/High/Low/Close en DataFrames dates x titres, ajustés comme la clôture."""
+    px = to_long(prices).copy()
+    if "Adj Close" in px.columns:                 # prix bruts + clôture ajustée : on ajuste tout
+        f = px["Adj Close"] / px["Close"]
+        for c in ("Open", "High", "Low"):
+            if c in px.columns:
+                px[c] = px[c] * f
+        px["Close"] = px["Adj Close"]
+    return {c: px[c].unstack("ticker").sort_index()
+            for c in ("Open", "High", "Low", "Close") if c in px.columns}
+
+
+def atr_wilder(o: dict[str, pd.DataFrame], n: int = 14) -> pd.DataFrame:
+    h, l, c = o["High"], o["Low"], o["Close"]
+    pc = c.shift(1)
+    tr = np.maximum(h - l, np.maximum((h - pc).abs(), (l - pc).abs()))
+    return tr.ewm(alpha=1 / n, adjust=False).mean()
+
+
+def _backtest_stop(dec: pd.DataFrame, prices, atr, horizon: int, k: float,
+                   couts_bps: float, stop_sur: str) -> dict:
+    """Simulation trade par trade : chaque position a son propre stop et sa propre sortie.
+
+    Même découpage en tranches que sans stop : une position ouverte le jour d prend
+    1 / (H x nombre de titres retenus ce jour-là) du capital. Après un stop, cette part
+    reste en liquidités jusqu'à la fin de la tranche.
+    """
+    o = ohlc(prices)
+    dates, cols = dec.index, dec.columns
+    C = o["Close"].reindex(index=dates, columns=cols).to_numpy()
+    if stop_sur == "low":
+        if "Low" not in o or "High" not in o:
+            raise ValueError("stop_sur='low' demande les colonnes High et Low dans prices.")
+        L = o["Low"].reindex(index=dates, columns=cols).to_numpy()
+        Hh = o["High"].reindex(index=dates, columns=cols).to_numpy()
+        O = o["Open"].reindex(index=dates, columns=cols).to_numpy() if "Open" in o else None
+    if atr is None:
+        if "High" not in o or "Low" not in o:
+            raise ValueError("Pour calculer l'ATR il faut High et Low ; sinon passez atr=...")
+        atr = atr_wilder(o)
+    A = atr.reindex(index=dates, columns=cols).to_numpy()
+
+    D = dec.to_numpy()
+    n_jour = np.abs(D).sum(axis=1)
+    T = len(dates)
+    brut, frais, expo = np.zeros(T), np.zeros(T), np.zeros(T)
+    cout = couts_bps / 1e4
+    lignes = []
+
+    for i, j in np.argwhere(D != 0):
+        sens = D[i, j]
+        p0, a = C[i, j], A[i, j]
+        if not (np.isfinite(p0) and np.isfinite(a)) or i + 1 >= T:
+            continue
+        w = 1.0 / (horizon * n_jour[i])
+        stop = p0 - sens * k * a
+        frais[i + 1] += w * cout                           # frais d'entrée
+        prec, sortie, motif, px_sortie = p0, None, "échéance", p0
+        fin = min(i + horizon, T - 1)
+        for t in range(i + 1, fin + 1):
+            ct = C[t, j]
+            # le stop est-il touché ce jour-là ?
+            if stop_sur == "low":
+                extreme = L[t, j] if sens > 0 else Hh[t, j]
+                touche = np.isfinite(extreme) and (extreme <= stop if sens > 0 else extreme >= stop)
+                if touche:
+                    ouv = O[t, j] if O is not None else np.nan
+                    gap = np.isfinite(ouv) and (ouv < stop if sens > 0 else ouv > stop)
+                    px = ouv if gap else stop
+            else:
+                touche = np.isfinite(ct) and (ct <= stop if sens > 0 else ct >= stop)
+                px = ct
+            if touche:
+                brut[t] += w * sens * (px / prec - 1)
+                expo[t] += w
+                sortie, motif, px_sortie = t, "stop", px
+                break
+            if np.isfinite(ct):
+                brut[t] += w * sens * (ct / prec - 1)
+                prec = ct
+                px_sortie = ct
+            expo[t] += w
+        if sortie is None:
+            sortie = fin
+            motif = "échéance" if fin == i + horizon else "fin de période"
+        frais[sortie] += w * cout                          # frais de sortie
+        lignes.append({"date": dates[i], "ticker": cols[j],
+                       "sens": "achat" if sens > 0 else "vente",
+                       "prix d'entrée": p0, "ATR": a, "stop": stop,
+                       "date de sortie": dates[sortie], "motif de sortie": motif,
+                       "séances détenues": sortie - i, "prix de sortie": px_sortie,
+                       "rdt_H": px_sortie / p0 - 1,
+                       "gain": sens * (px_sortie / p0 - 1)})
+
+    trades = pd.DataFrame(lignes)
+    if len(trades):
+        trades = trades.set_index(["date", "ticker"])
+    else:
+        trades = pd.DataFrame(columns=["rdt_H", "sens", "gain", "motif de sortie"])
+    brut = pd.Series(brut, index=dates)
+    frais = pd.Series(frais, index=dates)
+    return {"net": brut - frais, "brut": brut, "frais": frais,
+            "poids": pd.Series(expo, index=dates).to_frame("exposition"),
+            "trades": trades}
 
 
 def _stats_serie(r: pd.Series) -> dict:
@@ -137,6 +265,12 @@ def statistiques(res: dict, horizon: int) -> pd.DataFrame:
         "exposition moyenne (part du capital investie)": res["poids"].abs().sum(axis=1).mean(),
         "frais totaux (en % du capital)": res["frais"].sum(),
     }
+    if "motif de sortie" in t.columns and len(t):
+        stp = t["motif de sortie"] == "stop"
+        extra["trades sortis par le stop"] = stp.mean()
+        extra["gain moyen des trades stoppés"] = t.loc[stp, "gain"].mean() if stp.any() else np.nan
+        extra["gain moyen des trades à échéance"] = t.loc[~stp, "gain"].mean() if (~stp).any() else np.nan
+        extra["durée moyenne de détention (séances)"] = t["séances détenues"].mean()
     for k, v in extra.items():
         s.loc[k, "stratégie (net de frais)"] = v
     return s
@@ -147,8 +281,11 @@ def statistiques(res: dict, horizon: int) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 def choisir_seuils(pred_val: pd.DataFrame, rets: pd.DataFrame, horizon: int = 4,
                    grille_achat=None, grille_vente=None, couts_bps: float = 10.0,
-                   min_trades: int = 50, max_positions: int | None = None) -> pd.DataFrame:
+                   min_trades: int = 50, max_positions: int | None = None,
+                   **options_stop) -> pd.DataFrame:
     """Teste plusieurs seuils sur la validation et les classe par Sharpe net.
+
+    options_stop : stop_atr=..., prices=..., atr=..., stop_sur=... comme dans backtest.
 
     min_trades : un seuil qui ne déclenche que 10 trades n'est pas évaluable ;
                  il est écarté, même si son résultat est spectaculaire.
@@ -162,7 +299,8 @@ def choisir_seuils(pred_val: pd.DataFrame, rets: pd.DataFrame, horizon: int = 4,
         for sv in grille_vente:
             if sv is not None and sv >= sa:
                 continue
-            bt = backtest(pred_val, rets, sa, sv, horizon, couts_bps, max_positions)
+            bt = backtest(pred_val, rets, sa, sv, horizon, couts_bps, max_positions,
+                          **options_stop)
             st = bt["stats"]["stratégie (net de frais)"]
             lignes.append({"seuil_achat": sa, "seuil_vente": sv,
                            "Sharpe net": st["Sharpe (sans taux sans risque)"],
