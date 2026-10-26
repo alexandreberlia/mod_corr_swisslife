@@ -75,13 +75,17 @@ def _noter(pred_val: pd.DataFrame, rets: pd.DataFrame, horizon: int, couts_bps: 
 # ---------------------------------------------------------------------------
 # Modèle rapide : régression logistique sur les variables du jour
 # ---------------------------------------------------------------------------
-def _matrice(data, d: pd.DataFrame) -> pd.DataFrame:
-    """Variables du jour + interactions signal x régime (la lecture selon le score)."""
+def _matrice(data, d: pd.DataFrame, regimes: list[str]) -> pd.DataFrame:
+    """Variables du jour + interactions signal x régime (la lecture selon le score).
+
+    regimes : indicatrices de régime à croiser avec les signaux. Elles sont choisies
+    UNE fois, sur l'entraînement, pour que validation et entraînement aient
+    exactement les mêmes colonnes (sinon scikit-learn refuse de prédire).
+    """
     X = d[data.feature_cols].copy()
-    for r in [c for c in ("regime_bas", "regime_eleve") if c in d.columns]:
-        if d[r].nunique() > 1:
-            for c in data.signal_cols:
-                X[f"{c}_x_{r}"] = d[c] * d[r]
+    for r in regimes:
+        for c in data.signal_cols:
+            X[f"{c}_x_{r}"] = d[c] * d[r]
     for c in [c for c in data.regime_cols if c not in ("regime_bas", "regime_eleve")]:
         X[c] = d[c]
     return X
@@ -92,8 +96,13 @@ def _predire_logistique(data, C: float = 0.1) -> pd.DataFrame:
 
     df = data.df
     tr, va = df[df["split"] == "train"], df[df["split"] == "val"]
-    m = LogisticRegression(C=C, max_iter=3000).fit(_matrice(data, tr), tr["target"])
-    return pd.DataFrame({"proba": m.predict_proba(_matrice(data, va))[:, 1],
+    # régimes qui varient sur l'ENTRAÎNEMENT (une indicatrice constante n'apprend rien)
+    regimes = [r for r in ("regime_bas", "regime_eleve")
+               if r in tr.columns and tr[r].nunique() > 1]
+    X_tr = _matrice(data, tr, regimes)
+    X_va = _matrice(data, va, regimes)[X_tr.columns]          # mêmes colonnes, même ordre
+    m = LogisticRegression(C=C, max_iter=3000).fit(X_tr, tr["target"])
+    return pd.DataFrame({"proba": m.predict_proba(X_va)[:, 1],
                          "y": va["target"].to_numpy()}, index=va.index)
 
 
