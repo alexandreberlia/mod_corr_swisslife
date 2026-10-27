@@ -413,8 +413,21 @@ def decisions_du_jour(model, data, window: int, seuil_achat: float,
     from windows import WindowDataset
 
     if not (data.df["split"] == "live").any():
-        raise ValueError("Aucune ligne 'live' : mettez à jour prix et indicateurs jusqu'à "
-                         "aujourd'hui, puis relancez prepare_dataset.")
+        dates = data.df.index.get_level_values("date")
+        derniere = dates.max()
+        statuts = data.df.loc[dates == derniere, "split"].value_counts().to_dict()
+        if "target" in data.df and data.df["target"].notna().all():
+            cause = ("aucune ligne au futur inconnu : vous utilisez probablement une ANCIENNE "
+                     "version de data_prep.py. Remplacez-la, redémarrez le noyau Python, puis "
+                     "relancez prepare_dataset.")
+        elif statuts.get("hors_score"):
+            cause = (f"le score macro du {derniere.date()} est hors du domaine d'entraînement "
+                     "(filtre score_min / score_max) : le modèle ne décide pas dans ce régime.")
+        else:
+            cause = (f"la dernière date préparée est le {derniere.date()} (statuts : {statuts}). "
+                     "Mettez à jour prix ET indicateurs jusqu'à aujourd'hui, puis relancez "
+                     "prepare_dataset.")
+        raise ValueError("Aucune ligne disponible pour la prévision du jour : " + cause)
     ds = WindowDataset(data, "live", window=window, static=static)
     pred = predict(model, DataLoader(ds, batch_size=512, shuffle=False), with_weights=True)
     derniere = pred.index.get_level_values("date").max()
