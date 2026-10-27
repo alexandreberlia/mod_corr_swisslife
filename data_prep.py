@@ -371,6 +371,7 @@ def prepare_dataset(prices,
                     regime_col: str | None = None,
                     seuils_regime: tuple[float, float] | None = None,
                     variables_prix: bool = True,
+                    scaler: "Scaler | None" = None,
                     score_min: float | None = None,
                     score_max: float | None = None,
                     score_col: str | None = None,
@@ -395,6 +396,9 @@ def prepare_dataset(prices,
       seuils_regime  : (25, 75) par défaut : ajoute deux indicatrices 0/1, régime bas et élevé.
 
     variables_prix : False pour retirer les rendements / volatilité calculés sur les prix.
+    scaler         : normalisation déjà apprise (celle de l'entraînement du modèle). À passer
+                     pour préparer de NOUVELLES données en vue d'une prédiction (prevision.py) :
+                     elles sont alors normalisées exactement comme à l'entraînement.
 
     Restreindre le modèle à certains niveaux du score :
       score_min / score_max : seuls les jours où score > score_min (et < score_max)
@@ -508,7 +512,12 @@ def prepare_dataset(prices,
     train = data["split"] == "train"
     scale_cols = [c for c in feature_cols + regime_cols if c not in no_scale] \
         + (["target"] if scale_target and target == "return" else [])
-    scaler = Scaler().fit(data.loc[train, scale_cols])
+    if scaler is None:
+        scaler = Scaler().fit(data.loc[train, scale_cols])
+    else:
+        manquantes = [c for c in scale_cols if c not in scaler.mean.index]
+        if manquantes:
+            raise ValueError(f"Variables absentes de la normalisation sauvegardée : {manquantes}")
     data[scale_cols] = scaler.transform(data[scale_cols])
 
     tickers = sorted(data.index.get_level_values("ticker").unique())
