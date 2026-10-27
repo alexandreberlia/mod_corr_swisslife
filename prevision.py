@@ -26,6 +26,61 @@ import pandas as pd
 
 
 # ---------------------------------------------------------------------------
+# Séance figée : utiliser le cours du moment comme « clôture » du jour
+# ---------------------------------------------------------------------------
+def figer_seance(prices: dict, cours: dict, date=None, volume: str = "retirer") -> dict:
+    """Remplace la séance du jour par un instantané pris en cours de séance (ex. 16h30).
+
+    prices : votre dictionnaire {titre: DataFrame Open/High/Low/Close[/Volume]}
+    cours  : {titre: cours au moment de la prédiction}, ex. {"MC.PA": 712.4, ...}
+    date   : date de la séance (par défaut : aujourd'hui)
+    volume : la séance n'étant pas finie, son volume est partiel.
+             "retirer" (défaut) = volume du jour mis à NaN (à éviter si vos indicateurs
+             ou variables_prix utilisent le volume) ; "garder" = volume partiel tel quel.
+
+    Pour chaque titre, la ligne du jour devient :
+      Close = cours fourni (il servira de prix d'achat)
+      High  = max(plus haut déjà atteint aujourd'hui, cours) ; Low = min(plus bas, cours)
+      Open  = ouverture du jour si connue, sinon le cours fourni
+    Les séances suivantes éventuelles sont supprimées. Recalculez ENSUITE vos indicateurs
+    (panels) à partir du dictionnaire renvoyé, puis lancez prepare_dataset.
+    """
+    date = pd.Timestamp(date or pd.Timestamp.today()).normalize()
+    out = {}
+    for t, df in prices.items():
+        df = df.copy()
+        if isinstance(df.columns, pd.MultiIndex):          # format yf.download récent
+            lvl = 0 if {"Close", "Open"} & set(df.columns.get_level_values(0)) else 1
+            df.columns = df.columns.get_level_values(lvl)
+        idx = pd.to_datetime(df.index)
+        if idx.tz is not None:
+            idx = idx.tz_localize(None)
+        df.index = idx.normalize()
+        df = df[df.index <= date]
+        if t not in cours:
+            out[t] = df[df.index < date]                    # pas de cours : séance du jour retirée
+            print(f"  {t} : pas de cours fourni, la séance du {date.date()} est ignorée.")
+            continue
+        c = float(cours[t])
+        if date in df.index:
+            row = df.loc[date].copy()
+            row["Open"] = row.get("Open", c) if pd.notna(row.get("Open", np.nan)) else c
+            row["High"] = np.nanmax([row.get("High", np.nan), c])
+            row["Low"] = np.nanmin([row.get("Low", np.nan), c])
+        else:
+            row = pd.Series({col: np.nan for col in df.columns})
+            row["Open"] = row["High"] = row["Low"] = c
+        row["Close"] = c
+        if "Adj Close" in df.columns:
+            row["Adj Close"] = c                            # pas d'ajustement pour la séance du jour
+        if "Volume" in df.columns and volume == "retirer":
+            row["Volume"] = np.nan
+        df.loc[date] = row
+        out[t] = df.sort_index()
+    return out
+
+
+# ---------------------------------------------------------------------------
 # A. Sauvegarde de la préparation (après l'entraînement)
 # ---------------------------------------------------------------------------
 def sauver_preparation(path: str, data, window: int, reglages: dict,
