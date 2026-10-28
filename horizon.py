@@ -55,10 +55,12 @@ def auc_intervalle(pred: pd.DataFrame, n: int = 300, seed: int = 0) -> tuple[flo
 
 
 def _noter(pred_val: pd.DataFrame, rets: pd.DataFrame, horizon: int, couts_bps: float,
-           max_positions: int | None, min_trades: int) -> dict:
+           max_positions: int | None, min_trades: int, prices=None,
+           entree: str = "ouverture", **options_backtest) -> dict:
     m = proba_metrics(pred_val["proba"].to_numpy(), pred_val["y"].to_numpy())
     lo, hi = auc_intervalle(pred_val)
     grille = choisir_seuils(pred_val, rets, horizon=horizon, couts_bps=couts_bps,
+                            prices=prices, entree=entree, **options_backtest,
                             max_positions=max_positions, min_trades=min_trades)
     best = grille.iloc[0]
     return {"jours-titres validation": len(pred_val),
@@ -113,11 +115,18 @@ def comparer_horizons(prices, indicators, macro, horizons=(1, 2, 3, 4, 5, 7, 10,
                       methode: str = "logistique", window: int = 20, batch_size: int = 256,
                       cfg=None, couts_bps: float = 10.0, max_positions: int | None = None,
                       min_trades: int = 50, static=None, adapter_memoire: bool = False,
+                      entree: str = "ouverture", stop_atr: float | None = None,
+                      atr=None, stop_sur: str = "low", n_tranches: int | None = None,
                       out_dir: str = "horizons", **prep_kwargs) -> pd.DataFrame:
     """Entraîne et note un modèle par horizon, sur la validation.
 
     methode         : "logistique" (rapide) ou "reseau" (VSN+LSTM, plusieurs minutes par horizon)
     cfg             : TrainConfig pour le réseau (par défaut task="proba", d_model=16)
+    entree          : moment de l'achat dans le backtest, comme dans backtest() :
+                      "ouverture" (défaut, ouverture du lendemain) ou "cloture" (si vous achetez
+                      au cours qui sert à la prédiction, ex. cours de 16h30 avec figer_seance)
+    stop_atr, atr, stop_sur, n_tranches : options du backtest, comme dans backtest()
+                      (stop désactivé si stop_atr=None)
     adapter_memoire : False = mêmes variables pour tous les horizons (seule la cible change :
                       comparaison la plus propre). True = la mémoire des signaux s'allonge
                       avec l'horizon (max_jours = max(10, H)).
@@ -125,6 +134,8 @@ def comparer_horizons(prices, indicators, macro, horizons=(1, 2, 3, 4, 5, 7, 10,
     """
     os.makedirs(out_dir, exist_ok=True)
     rets = rendements_journaliers(prices)
+    # « horizon » est ce qu'on fait varier : une valeur venant de vos réglages est ignorée
+    prep_kwargs = {k: v for k, v in prep_kwargs.items() if k != "horizon"}
     prep_kwargs = {**prep_kwargs, "target": "direction"}
     if methode == "reseau":
         from train import TrainConfig, predict, train
@@ -149,7 +160,8 @@ def comparer_horizons(prices, indicators, macro, horizons=(1, 2, 3, 4, 5, 7, 10,
             model, hist = train(loaders, cfg, save_path=os.path.join(out_dir, f"modele_h{H}.pt"))
             pv = predict(model, loaders["val"])
             extra = {"meilleure époque": int(hist["val_loss"].idxmin())}
-        note = _noter(pv, rets, H, couts_bps, max_positions, min_trades)
+        note = _noter(pv, rets, H, couts_bps, max_positions, min_trades, prices, entree,
+                      stop_atr=stop_atr, atr=atr, stop_sur=stop_sur, n_tranches=n_tranches)
         lignes.append({"horizon (séances)": H, **note, **extra})
         print(f"H = {H:>2} : AUC {note['AUC']:.3f} [{note['AUC IC95 bas']:.3f} ; "
               f"{note['AUC IC95 haut']:.3f}]  Sharpe net {note['Sharpe net (validation)']:.2f} "
