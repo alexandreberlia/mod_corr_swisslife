@@ -73,7 +73,8 @@ def backtest(pred: pd.DataFrame, rets: pd.DataFrame, seuil_achat: float,
              couts_bps: float = 10.0, max_positions: int | None = None,
              stop_atr: float | None = None, prices=None, atr: pd.DataFrame | None = None,
              stop_sur: str = "low", entree: str = "ouverture",
-             n_tranches: int | None = None) -> dict:
+             n_tranches: int | None = None, reference: str = "conserve",
+             **autres_options) -> dict:
     """Rejoue la stratégie sur la période couverte par `pred` (sortie de predict()).
 
     couts_bps : frais + écart achat/vente, en points de base par aller simple
@@ -87,6 +88,14 @@ def backtest(pred: pd.DataFrame, rets: pd.DataFrame, seuil_achat: float,
                  La position est gardée `horizon` séances à partir de l'entrée.
       prices   : votre dictionnaire de prix ; obligatoire sauf avec entree="cloture"
       n_tranches : nombre de parts du capital ; par défaut = horizon (voir poids_portefeuille).
+
+    Référence (ce qu'on aurait obtenu sans modèle), frais compris aux mêmes couts_bps :
+      reference : "conserve" (défaut) = achat de tous les titres à parts égales le premier jour,
+                  puis conservation : les poids dérivent avec les cours, aucun rééquilibrage.
+                  Frais : achat initial, et entrée d'un titre qui rejoint le panier en cours
+                  de période (on remet alors tout à parts égales).
+                  "reequilibree" = remise à parts égales chaque jour ; frais de chaque
+                  rééquilibrage comptés.
 
     Stop de protection (optionnel) :
       stop_atr : distance du stop en multiples d'ATR, ex. 2. Pour un achat au cours P,
@@ -105,9 +114,9 @@ def backtest(pred: pd.DataFrame, rets: pd.DataFrame, seuil_achat: float,
     dec = dec.reindex(index=dates, columns=rets.columns).fillna(0)
     r = rets.reindex(index=dates)
 
-    # Référence : tous les titres de l'univers à parts égales, toujours investi
+    # Référence : tous les titres de l'univers à parts égales, frais compris
     eligibles = pred["proba"].unstack("ticker").reindex(index=dates, columns=rets.columns).notna()
-    reference = r.where(eligibles.cumsum() > 0).mean(axis=1).fillna(0.0)
+    reference = _reference(r, eligibles, couts_bps, reference)
 
     n_tranches = n_tranches or horizon
     if stop_atr is not None or entree != "cloture" or n_tranches != horizon:
@@ -145,6 +154,34 @@ def backtest(pred: pd.DataFrame, rets: pd.DataFrame, seuil_achat: float,
            "poids": w, "decisions": dec, "trades": trades}
     res["stats"] = statistiques(res, horizon)
     return res
+
+
+def _reference(r: pd.DataFrame, eligibles: pd.DataFrame, couts_bps: float,
+               mode: str = "conserve") -> pd.Series:
+    """Rendement quotidien net de frais du panier équipondéré.
+
+    Un titre entre dans le panier à sa première prédiction. Les poids sont des parts
+    de la valeur du portefeuille ; après chaque séance, ils dérivent avec les cours.
+    """
+    c = couts_bps / 1e4
+    R = r.fillna(0.0).to_numpy()
+    E = (eligibles.cumsum() > 0).to_numpy()
+    T, N = R.shape
+    w = np.zeros(N)
+    out = np.zeros(T)
+    for t in range(T):
+        g = float((w * R[t]).sum())                       # rendement avec les poids de la veille
+        if w.sum() > 0:
+            w = w * (1 + R[t]) / (1 + g)                  # dérive des poids
+        cible = E[t] / E[t].sum() if E[t].any() else np.zeros(N)
+        change = (t == 0) or (E[t] != E[t - 1]).any()
+        if mode == "reequilibree" or change:
+            rotation = np.abs(cible - w).sum()            # part du portefeuille échangée
+            w = cible
+        else:
+            rotation = 0.0
+        out[t] = g - rotation * c
+    return pd.Series(out, index=r.index)
 
 
 def ohlc(prices) -> dict[str, pd.DataFrame]:
@@ -401,11 +438,21 @@ def rapport_backtest(res: dict, out_dir: str = "backtest", titre: str = "") -> p
 # ---------------------------------------------------------------------------
 def decisions_du_jour(model, data, window: int, seuil_achat: float,
                       seuil_vente: float | None = None, static=None,
-                      horizon: int = 4) -> pd.DataFrame:
+                      horizon: int = 4, prices=None, entree: str = "ouverture",
+                      stop_atr: float | None = None, atr: pd.DataFrame | None = None,
+                      **autres_options) -> pd.DataFrame:
     """Probabilité et décision pour chaque titre, à la dernière date disponible.
 
     `data` doit être préparé avec des prix à jour jusqu'à aujourd'hui : les dernières
     séances (dont le futur est inconnu) y sont étiquetées "live".
+
+    prices   : (optionnel) vos prix, pour afficher le cours d'achat et le niveau du stop
+    entree   : "cloture" si vous achetez au dernier cours disponible (figer_seance),
+               "ouverture" si vous achetez à l'ouverture suivante
+    stop_atr : (optionnel) multiple d'ATR du stop ; affiche stop = cours - stop_atr x ATR
+    atr      : DataFrame dates x titres de l'ATR (ex. panels["atr"])
+    autres_options : les autres clés de votre dictionnaire d'options (couts_bps, ...)
+                     sont acceptées et ignorées ici, pour pouvoir passer **OPTIONS partout.
     """
     from torch.utils.data import DataLoader
 
@@ -448,12 +495,31 @@ def decisions_du_jour(model, data, window: int, seuil_achat: float,
         brut = c[4:]
         if brut in data.scaler.mean.index:
             jour[c] = jour[c] * data.scaler.std[brut] + data.scaler.mean[brut]
-    cols = ["proba", "décision", "sortie prévue"] + (["signaux récents"] if sig_cols else []) \
-        + [c for c in jour.columns if c.startswith("ctx_")]
+    extra = []
+    if prices is not None:
+        close = ohlc(prices)["Close"]
+        cours = close.loc[derniere].reindex(jour.index) if derniere in close.index else np.nan
+        jour["dernier cours"] = cours
+        extra.append("dernier cours")
+        if stop_atr is not None:
+            if atr is None:
+                atr = atr_wilder(ohlc(prices))
+            a = atr.loc[derniere].reindex(jour.index) if derniere in atr.index else np.nan
+            sens = np.where(jour["décision"] == "VENDRE", -1, 1)
+            jour["stop"] = np.where(jour["décision"] != "-", cours - sens * stop_atr * a, np.nan)
+            extra.append("stop")
+    cols = ["proba", "décision", "sortie prévue"] + extra \
+        + (["signaux récents"] if sig_cols else []) + [c for c in jour.columns if c.startswith("ctx_")]
     out = jour[cols].sort_values("proba", ascending=False)
     out.attrs["date"] = derniere
-    print(f"Données du {derniere.date()} : ordres à exécuter à l'ouverture de la séance "
-          f"suivante (seuil d'achat {seuil_achat:.3f}) :")
+    if entree == "cloture":
+        quand = "maintenant, au dernier cours disponible (celui qui a servi au calcul)"
+    elif entree == "cloture_suivante":
+        quand = "à la clôture de la séance suivante"
+    else:
+        quand = "à l'ouverture de la séance suivante"
+    print(f"Données du {derniere.date()} : ordres à exécuter {quand} "
+          f"(seuil d'achat {seuil_achat:.3f}" + (f", stop à {stop_atr} ATR)" if stop_atr else ", sans stop)"))
     return out
 
 
