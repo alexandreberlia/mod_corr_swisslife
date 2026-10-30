@@ -152,11 +152,11 @@ Corrélation, pas causalité. Relation supposée stable sur toute la période. E
 Un score de **0 à 100** résumant l'état du cycle, dans le prolongement du découpage en quatre phases mais en continu.
 Le calcul du score suit une méthode d'analyse en composante principale (ACP). L'ACP cherche à récupérer l'information commune que portent les indicateurs. 
 Les variables sont d'abords standardisées puis décomposées comme la somme d'un facteur commun, pondéré par un poids mesurant la sensibilité de la variable au facteur commun, et d'une composante spécifique à l'indicateur.
-$z_j = \frac{X_j-\mu_j}{\sigmz_j}, puis z_j=\lambda_j F + \varepsilon_j$,
+$z_j = \frac{X_j-\mu_j}{\sigma_j}$, puis $z_j=\lambda_j F + \varepsilon_j$,
 avec $F$ le facteur commun, $\lambda$ la sensibilité de la variable j au facteur commun et $\varepsilon_j$ la composante spécifique à la variable.
 L'ACP construit ensuite une variable, la première composante principale, moyenne pondérée des variables : $PC_1 = \sum_{j=1}^{p}w_jZ_j$. Les poids ne sont pas choisis, l'ACP retient ceux qui font le plus 'bouger' la combinaison. Les poids sélectionnées sont ceux qui maximisent la variance de la première composante principale, sous contrainte de normalisation. La maximisation de cette variance revient à trouver les valeurs propres de la matrice de corrélation des composantes standardisées (corrélation et covariance coïncident). 
 Formellement : 
-$\mathbf{w}_1=\underset{\mathbf{w}^{\top}\mathbf{w}=1}{\operatorname{arg\,max}}
+\mathbf{w}_1=\underset{\mathbf{w}^{\top}\mathbf{w}=1}{\operatorname{arg\,max}}
 \operatorname{Var}\left(\mathbf{w}^{\top}\mathbf{Z}\right).
 
 Hypothèse : le moteur commun est le cycle économique et le score en est donc un quantifieur. 
