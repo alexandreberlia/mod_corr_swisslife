@@ -7,7 +7,9 @@ Tout est rangé dans un dossier (par défaut "suivi/"), en fichiers lisibles dan
   probas.csv         probabilité de CHAQUE titre CHAQUE jour (pour mesurer l'AUC en réel)
   ordres.csv         achats et ventes exécutés (prix, quantité, frais, motif)
   trades.csv         trades clôturés (entrée, sortie, gain)
-  valeur.csv         valeur du portefeuille à chaque lancement enregistré
+  valeur.csv         valeur du portefeuille (cash + positions) à chaque jour enregistré
+  positions.csv      photo des positions chaque jour enregistré : cours, valeur, P&L latent
+  bilan.xlsx         résumé : cash, positions et P&L, ordres, trades, AUC réelle
 
 Utilisation :
   demarrer_strategie("suivi", capital=100_000)             # une seule fois, le premier jour
@@ -178,6 +180,20 @@ def enregistrer_jour(dossier: str, dec: dict, couts_bps: float = 10.0, max_posit
         "date", "ticker", "date d'entrée", "prix d'entrée", "date de sortie", "prix de sortie",
         "motif", "gain", "résultat net"]), date)
     v, inv = valeur()
+    # Photo des positions au cours du jour : P&L latent ligne par ligne
+    pos = []
+    for t in port:
+        for l in lignes(t):
+            q, pa, pc = float(l.get("quantite", np.nan)), float(l.get("prix", np.nan)), px(t)
+            cout = q * pa * (1 + c)                         # prix payé, frais d'achat compris
+            val = q * pc
+            pos.append({"date": date, "ticker": t, "date d'achat": l["date"], "prix d'achat": pa,
+                        "quantité": q, "cours du jour": pc, "valeur": val, "coût (frais inclus)": cout,
+                        "P&L latent": val - cout, "P&L latent %": val / cout - 1 if cout else np.nan,
+                        "poids dans le portefeuille": val / v if v else np.nan})
+    _ajouter_csv(_p(dossier, "positions.csv"), pd.DataFrame(pos, columns=[
+        "date", "ticker", "date d'achat", "prix d'achat", "quantité", "cours du jour", "valeur",
+        "coût (frais inclus)", "P&L latent", "P&L latent %", "poids dans le portefeuille"]), date)
     _ajouter_csv(_p(dossier, "valeur.csv"), pd.DataFrame([{
         "date": date, "liquidités": etat["liquidites"], "investi": inv, "valeur": v,
         "lignes": sum(len(lignes(t)) for t in port),
@@ -197,14 +213,33 @@ def bilan(dossier: str, prices: dict | None = None, horizon: int | None = None,
     l'issue est connue (cours horizon séances plus tard). Écrit bilan.xlsx dans le dossier."""
     lire = lambda n: pd.read_csv(_p(dossier, n), sep=";", decimal=",") \
         if os.path.exists(_p(dossier, n)) else pd.DataFrame()
-    valeur, trades, ordres, probas = (lire("valeur.csv"), lire("trades.csv"),
-                                      lire("ordres.csv"), lire("probas.csv"))
+    valeur, trades, ordres, probas, positions = (lire("valeur.csv"), lire("trades.csv"),
+                                                 lire("ordres.csv"), lire("probas.csv"),
+                                                 lire("positions.csv"))
     etat = _lire_json(_p(dossier, "etat.json"), {})
-    res = {"valeur": valeur, "trades": trades, "ordres": ordres}
+    # positions actuelles = photo du dernier jour enregistré
+    if len(positions) and len(valeur):
+        derniere = valeur["date"].iloc[-1]
+        pos_act = positions[positions["date"] == derniere].drop(columns="date")
+    else:
+        derniere, pos_act = None, pd.DataFrame()
+    res = {"positions": pos_act, "valeur": valeur, "trades": trades, "ordres": ordres,
+           "historique des positions": positions}
+    pnl_latent = pos_act["P&L latent"].sum() if len(pos_act) else 0.0
+    pnl_realise = trades["résultat net"].sum() if len(trades) else 0.0
     lignes = {"date de début": etat.get("date_debut"),
+              "dernier jour enregistré": derniere,
               "capital initial": etat.get("capital_initial"),
+              "liquidités (cash)": etat.get("liquidites"),
+              "valeur des positions": pos_act["valeur"].sum() if len(pos_act) else 0.0,
               "valeur actuelle": valeur["valeur"].iloc[-1] if len(valeur) else np.nan,
-              "trades clôturés": len(trades),
+              "P&L latent (positions ouvertes)": pnl_latent,
+              "P&L réalisé (trades clôturés)": pnl_realise,
+              "achats exécutés": int((ordres["sens"] == "ACHAT").sum()) if len(ordres) else 0,
+              "ventes exécutées": int((ordres["sens"] == "VENTE").sum()) if len(ordres) else 0,
+              "lignes ouvertes": sum(len(v) if isinstance(v, list) else 1
+                                     for v in charger_portefeuille(dossier).values()),
+              "trades clôturés (achetés puis revendus)": len(trades),
               "trades gagnants": (trades["gain"] > 0).mean() if len(trades) else np.nan,
               "frais payés": ordres["frais"].sum() if len(ordres) else 0.0}
     lignes["performance"] = lignes["valeur actuelle"] / lignes["capital initial"] - 1 \
@@ -235,9 +270,15 @@ def bilan(dossier: str, prices: dict | None = None, horizon: int | None = None,
     out = out or _p(dossier, "bilan.xlsx")
     with pd.ExcelWriter(out, engine="openpyxl") as w:
         res["resume"].to_excel(w, sheet_name="Résumé")
-        for k in ("valeur", "trades", "ordres", "issues"):
+        noms = {"positions": "Positions", "valeur": "Valeur", "trades": "Trades clôturés",
+                "ordres": "Ordres", "historique des positions": "Historique positions",
+                "issues": "Issues des probas"}
+        for k, nom in noms.items():
             if k in res and len(res[k]):
-                res[k].to_excel(w, sheet_name=k.capitalize(), index=False)
+                res[k].to_excel(w, sheet_name=nom, index=False)
     print(res["resume"].to_string())
+    if len(pos_act):
+        print("\nPOSITIONS :\n", pos_act[["ticker", "date d'achat", "prix d'achat", "cours du jour",
+                                         "valeur", "P&L latent", "P&L latent %"]].round(2).to_string(index=False))
     print(f"Bilan écrit dans : {os.path.abspath(out)}")
     return res
