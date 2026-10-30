@@ -156,8 +156,10 @@ $z_j = \frac{X_j-\mu_j}{\sigma_j}$, puis $z_j=\lambda_j F + \varepsilon_j$,
 avec $F$ le facteur commun, $\lambda$ la sensibilité de la variable j au facteur commun et $\varepsilon_j$ la composante spécifique à la variable.
 L'ACP construit ensuite une variable, la première composante principale, moyenne pondérée des variables : $PC_1 = \sum_{j=1}^{p}w_jZ_j$. Les poids ne sont pas choisis, l'ACP retient ceux qui font le plus 'bouger' la combinaison. Les poids sélectionnées sont ceux qui maximisent la variance de la première composante principale, sous contrainte de normalisation. La maximisation de cette variance revient à trouver les valeurs propres de la matrice de corrélation des composantes standardisées (corrélation et covariance coïncident). 
 Formellement : 
-\mathbf{w}_1=\underset{\mathbf{w}^{\top}\mathbf{w}=1}{\operatorname{arg\,max}}
+$$
+\mathbf{w}_1=\underset{\mathbf{w}^{\top}\mathbf{w}=1}{\operatorname{arg\max}}
 \operatorname{Var}\left(\mathbf{w}^{\top}\mathbf{Z}\right).
+$$
 
 Hypothèse : le moteur commun est le cycle économique et le score en est donc un quantifieur. 
 Les variables qui s'expliquent le plus par le facteur commun ie ce que les séries partagent entre elles, sont davantage pondérées. 
