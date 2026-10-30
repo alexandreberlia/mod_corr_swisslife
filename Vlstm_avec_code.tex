@@ -1,0 +1,1006 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\IfFileExists{lmodern.sty}{\usepackage{lmodern}}{}
+\IfFileExists{french.ldf}{\usepackage[french]{babel}}{}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage[most]{tcolorbox}
+\usepackage{booktabs,tabularx,longtable}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\setlength{\emergencystretch}{3em}
+\let\usorig\_
+\renewcommand{\_}{\usorig\allowbreak}   % coupure possible après _ dans les noms de fonctions
+
+% ---------------------------------------------------------------------------
+% Mise en forme du code
+% ---------------------------------------------------------------------------
+\definecolor{codebg}{RGB}{247,247,249}
+\definecolor{codeframe}{RGB}{200,205,215}
+\definecolor{kw}{RGB}{0,70,160}
+\definecolor{cm}{RGB}{110,120,130}
+\definecolor{st}{RGB}{160,60,20}
+\definecolor{notebg}{RGB}{235,243,252}
+\definecolor{noteframe}{RGB}{70,120,190}
+
+\lstdefinestyle{py}{
+  language=Python,
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{kw}\bfseries,
+  commentstyle=\color{cm}\itshape,
+  stringstyle=\color{st},
+  showstringspaces=false,
+  breaklines=true,
+  breakatwhitespace=true,
+  columns=fullflexible,
+  keepspaces=true,
+  tabsize=4,
+  upquote=true,
+  literate=
+    {é}{{\'e}}1 {è}{{\`e}}1 {ê}{{\^e}}1 {ë}{{\"e}}1
+    {à}{{\`a}}1 {â}{{\^a}}1 {ç}{{\c{c}}}1 {ù}{{\`u}}1 {û}{{\^u}}1
+    {î}{{\^i}}1 {ï}{{\"i}}1 {ô}{{\^o}}1 {œ}{{\oe}}1
+    {É}{{\'E}}1 {È}{{\`E}}1 {À}{{\`A}}1 {Ç}{{\c{C}}}1
+    {«}{{\guillemotleft}}1 {»}{{\guillemotright}}1
+    {→}{{$\rightarrow$}}1 {≤}{{$\le$}}1 {≥}{{$\ge$}}1 {×}{{$\times$}}1
+    {↑}{{$\uparrow$}}1 {↓}{{$\downarrow$}}1
+}
+\lstset{style=py}
+
+% Bloc de code encadré :  \begin{code}[Titre]{fichier.py} ... \end{code}
+\tcbuselibrary{listings}
+\newtcblisting{code}[2][]{
+  listing only, breakable, enhanced,
+  colback=codebg, colframe=codeframe, boxrule=0.4pt, arc=2pt,
+  left=4pt, right=4pt, top=2pt, bottom=2pt,
+  title={\small\ttfamily #2\if\relax\detokenize{#1}\relax\else\ \textrm{--- #1}\fi},
+  coltitle=black, colbacktitle=codeframe!50,
+  listing options={style=py}
+}
+
+% Encadré « Dans le code » : correspondance théorie -> fichiers, fonctions, paramètres
+\newtcolorbox{danslecode}{
+  breakable, enhanced, colback=notebg, colframe=noteframe, boxrule=0.5pt, arc=2pt,
+  left=6pt, right=6pt, top=4pt, bottom=4pt,
+  title={\small\bfseries Dans le code}, coltitle=white, colbacktitle=noteframe
+}
+
+\newcommand{\f}[1]{\texttt{#1}}        % nom de fichier / fonction / paramètre
+
+\title{Architecture V-LSTM pour la prévision financière}
+\author{Alexandre Berlia}
+\date{Octobre 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\bigskip
+
+% ===========================================================================
+\section{Introduction}
+% ===========================================================================
+L'objectif du modèle est d'estimer la probabilité qu'un titre financier enregistre une
+hausse à un horizon donné, afin de construire une stratégie de trading systématique.
+Le modèle étudié est un modèle de \emph{deep learning} appelé V-LSTM. Son architecture
+combine un \emph{Variable Selection Network} (VSN) et un \emph{Long Short-Term Memory} (LSTM).
+Le VSN apprend quelles variables sont pertinentes à chaque date et leur attribue des
+poids. Le LSTM est un réseau récurrent qui traite une séquence temporelle et conserve
+les informations utiles issues des périodes précédentes grâce à des portes d'entrée,
+d'oubli et de sortie. Les variables explicatives comprennent notamment des signaux
+construits à partir d'indicateurs techniques. Ces signaux sont renseignés dans le fichier
+\f{signaux.py}. Il s'agit principalement de variables comprises entre 0 et 1, représentant
+la présence et la fraîcheur d'un signal d'achat ou de vente. L'horizon de prédiction est
+sélectionné par un algorithme d'optimisation. Cet algorithme compare plusieurs horizons
+sur un échantillon de validation et retient celui qui produit les meilleures performances
+après prise en compte des coûts de transaction.
+
+% ---------------------------------------------------------------------------
+\subsection{Organisation du code}
+% ---------------------------------------------------------------------------
+Le projet est découpé en modules Python, chacun correspondant à une étape du processus.
+Le tableau~\ref{tab:fichiers} donne la correspondance ; les sections suivantes renvoient
+aux fichiers et fonctions concernés dans des encadrés «~Dans le code~».
+
+\begin{table}[h]
+\centering\small
+\begin{tabularx}{\linewidth}{@{}l X l@{}}
+\toprule
+\textbf{Fichier} & \textbf{Rôle} & \textbf{Section} \\
+\midrule
+\f{signaux.py}      & Liste des règles de franchissement (indicateur, seuil, sens) et calcul de la fraîcheur & \ref{sec:signaux} \\
+\f{data\_prep.py}   & Assemblage prix + indicateurs + score, cible, découpage temporel, normalisation & \ref{sec:notations}, \ref{sec:score}, \ref{sec:decoupage} \\
+\f{windows.py}      & Construction des fenêtres de $T$ séances et des \emph{batchs} & \ref{sec:decoupage} \\
+\f{models.py}       & Réseau : GLU, GRN, VSN, LSTM, couche de sortie (\f{VSNLSTM}) & \ref{sec:vsn}, \ref{sec:lstm} \\
+\f{train.py}        & Entraînement (perte, Adam, \emph{early stopping}), chargement, prédiction & \ref{sec:perte}, \ref{sec:epoques} \\
+\f{resultats.py}    & Rapport sur la validation : AUC, calibration, poids du VSN, lecture par régime & \ref{sec:pipeline} \\
+\f{horizons.py}     & Comparaison des horizons $H$ sur la validation & \ref{sec:horizons} \\
+\f{Portefeuille.py} & Choix des seuils, backtest de la stratégie, décisions du jour & \ref{sec:seuils}, \ref{sec:backtest} \\
+\f{prevision.py}    & \f{figer\_seance} : insère le cours du moment comme séance du jour & \ref{sec:backtest} \\
+\f{decision.py}     & Fonctions communes (OHLC, ATR, référence, probabilités du jour) & --- \\
+\f{script\_xlk.py}  & Script principal : enchaîne toutes les étapes (point d'entrée) & \ref{sec:pipeline} \\
+\bottomrule
+\end{tabularx}
+\caption{Fichiers du projet.}
+\label{tab:fichiers}
+\end{table}
+
+\noindent Le script principal est le seul fichier à modifier en usage courant. Les
+paramètres y sont regroupés dans un bloc \f{RÉGLAGES} en tête de fichier et dans le
+dictionnaire \f{reglages}. La section~\ref{sec:pipeline} décrit le script complet et la
+section~\ref{sec:parametres} récapitule tous les paramètres modifiables.
+
+% ===========================================================================
+\section{Architecture}
+% ===========================================================================
+\subsection{Paramètres et notations}\label{sec:notations}
+On utilise les notations suivantes :
+\begin{itemize}[label=---]
+  \item $P_{i,t}$ : prix de clôture du titre $i$ à la date $t$.
+  \item $H$ : horizon de prédiction, exprimé en nombre de séances boursières.
+  \item $y_{i,t}$ : variable cible binaire définie par
+  \[
+    y_{i,t} = \mathbf{1}_{\{P_{i,t+H} > P_{i,t}\}} =
+    \begin{cases} 1, & \text{si } P_{i,t+H} > P_{i,t},\\ 0, & \text{sinon.} \end{cases}
+  \]
+  \item $\bm{x}_{i,t}$ : vecteur des variables explicatives du titre $i$ à la date $t$. Il
+  contient les signaux techniques et les variables de prix ; le score macroéconomique
+  entre séparément, comme contexte (section~\ref{sec:score}).
+  \item $K$ : nombre de variables explicatives.
+  \item $W_h$ : matrice des poids récurrents appliquée à l'état caché.
+  \item $\theta$ : ensemble des paramètres entraînables du modèle.
+  \item $\hat p_{i,t}$ : probabilité de hausse prédite par le modèle :
+  \[
+    \hat p_{i,t} = \mathbb{P}\left(P_{i,t+H} > P_{i,t} \mid \bm{x}_{i,t-T+1},\dots,\bm{x}_{i,t}\right).
+  \]
+  \item $T$ : longueur de la fenêtre temporelle utilisée par le modèle. Par exemple, $T=20$
+  signifie que le modèle observe les 20 dernières séances.
+\end{itemize}
+
+\begin{danslecode}
+La cible est construite dans \f{data\_prep.py} (fonction \f{price\_features}), appelée par
+\f{prepare\_dataset}. Les deux paramètres qui la définissent sont passés dans le script :
+\begin{itemize}[nosep]
+  \item \f{target="direction"} : cible binaire $y_{i,t}$ (avec \f{"return"}, la cible serait le rendement) ;
+  \item \f{horizon=HORIZON} : la valeur de $H$, fixée en tête de script.
+\end{itemize}
+La fenêtre $T$ est le paramètre \f{FENETRE} (\f{window} dans \f{make\_loaders}).
+\end{danslecode}
+
+\begin{code}[cible binaire]{data\_prep.py --- price\_features}
+log_close = np.log(prices[close_col])                 # log des clôtures
+lc  = log_close.groupby(level="ticker", group_keys=False)
+fwd = lc.shift(-horizon) - log_close                  # log(P_{t+H} / P_t), par titre
+feats["target"] = (fwd > 0).astype(float).where(fwd.notna()) if target == "direction" else fwd
+# les H dernières séances n'ont pas encore de cible : elles sont étiquetées "live"
+\end{code}
+
+% ---------------------------------------------------------------------------
+\subsection{Fonction de perte}\label{sec:perte}
+Le modèle réalise une classification binaire. La fonction de perte utilisée est
+l'entropie croisée binaire :
+\[
+  \mathcal{L}(\theta) = -\frac{1}{N}\sum_{k=1}^{N}\left[y_k\ln(\hat p_k) + (1-y_k)\ln(1-\hat p_k)\right],
+\]
+où $N$ représente le nombre d'observations, $y_k$ la valeur cible et $\hat p_k$ la
+probabilité prédite. Une perte faible signifie que le modèle attribue une probabilité
+élevée aux événements qui se réalisent effectivement et une probabilité faible aux
+événements qui ne se réalisent pas. En pratique, une version numériquement stable de
+cette fonction est appliquée directement aux \emph{logits} du modèle.
+
+\begin{danslecode}
+\f{TrainConfig(task="proba")} dans le script sélectionne cette perte. Dans \f{train.py},
+elle correspond à \f{nn.BCEWithLogitsLoss()} : le réseau sort un logit $z$ et la sigmoïde
+est intégrée à la perte (version stable). La probabilité $\hat p = \sigma(z)$ est calculée
+par \f{predict}, qui renvoie une colonne \f{proba}.
+\end{danslecode}
+
+% ---------------------------------------------------------------------------
+\subsection{Variables techniques}\label{sec:signaux}
+Les variables techniques représentent principalement des règles de lecture des
+indicateurs plutôt que leur niveau brut. Par exemple, le niveau exact du RSI peut être
+moins important que le franchissement d'un seuil. Un signal est déclenché le jour où
+l'indicateur passe au-dessus (ou en dessous) d'une valeur déterminée :
+\[
+  \text{franchissement à la hausse en } t \iff I_{t-1} < s \le I_t ,
+\]
+et symétriquement à la baisse. Le franchissement est ensuite transformé en une variable
+de fraîcheur. On définit :
+\[
+  f_t = \begin{cases} 2^{-d_t/\lambda}, & \text{si } 0 \le d_t \le 10,\\ 0, & \text{si } d_t > 10, \end{cases}
+  \qquad \lambda = 2 \text{ (demi-vie)},
+\]
+où $d_t$ représente le nombre de séances écoulées depuis le dernier déclenchement du
+signal. La valeur est divisée par 2 toutes les $\lambda$ séances. Par exemple :
+\begin{center}
+\begin{tabular}{c|ccccccc}
+$d_t$ & 0 & 1 & 2 & 3 & 4 & 5 & $>10$ \\ \hline
+$f_t$ & 1 & 0{,}71 & 0{,}5 & 0{,}35 & 0{,}25 & 0{,}18 & 0
+\end{tabular}
+\end{center}
+Le modèle sait ainsi qu'un signal a été déclenché, mais également depuis combien de temps.
+Un signal récent reçoit une valeur élevée, tandis qu'un signal ancien voit
+progressivement son influence diminuer.
+
+Chaque signal (d'achat comme de vente) est une variable distincte, à valeurs dans $[0,1]$.
+Un signal de vente n'est pas codé $-1$ : le réseau apprend lui-même le signe de l'effet de
+chaque variable. Garder deux colonnes séparées permet aussi d'accorder une importance
+différente à l'entrée et à la sortie d'un même indicateur.
+
+\begin{danslecode}
+\textbf{Règles} : liste \f{SIGNAUX} dans \f{signaux.py}. C'est le seul endroit où l'on
+ajoute, retire ou modifie une règle. Chaque entrée donne l'identifiant, la colonne de
+l'indicateur (\f{col}, qui doit porter exactement le même nom que la clé du dictionnaire
+d'indicateurs), le seuil, le sens du franchissement (\f{"up"}/\f{"down"}) et, pour
+information, le sens attendu de l'effet (\f{+1}/\f{-1}, non utilisé par le modèle).
+
+\textbf{Fraîcheur} : \f{memoire\_signaux}. Ses deux paramètres se règlent dans
+\f{reglages} (ils sont transmis à \f{prepare\_dataset}) :
+\f{demi\_vie} ($\lambda$, défaut 2) et \f{max\_jours} (défaut 10).
+
+\textbf{Indicateurs bruts} : avec \f{garder\_niveaux=False} (défaut), le modèle ne voit
+que les signaux, pas le niveau du RSI. \f{garder\_niveaux=True} ajoute les niveaux.
+
+\textbf{Variables de prix} : par défaut, \f{prepare\_dataset} ajoute aussi \f{ret\_1d},
+\f{ret\_5d}, \f{ret\_20d}, \f{vol\_20d} et \f{volume\_rel}. \f{variables\_prix=False} les retire.
+\end{danslecode}
+
+\begin{code}[liste des règles (extrait)]{signaux.py}
+SIGNAUX = [
+  {"id": "rsi_up45", "nom": "RSI ↑45",  "col": "rsi",    "seuil": 45,   "cross": "up",   "sens": +1},
+  {"id": "rsi_dn65", "nom": "RSI ↓65",  "col": "rsi",    "seuil": 65,   "cross": "down", "sens": -1},
+  {"id": "bb_up0",   "nom": "BB% ↑0",   "col": "bb_pct", "seuil": 0.0,  "cross": "up",   "sens": +1},
+  {"id": "bb_dn095", "nom": "BB% ↓0,95","col": "bb_pct", "seuil": 0.95, "cross": "down", "sens": -1},
+  # ... rev_5, stoch, hist (MACD), er : même structure
+]
+
+def franchissement(s, seuil, sens):
+    veille = s.groupby(level="ticker").shift(1)
+    if sens == "up":
+        return (veille < seuil) & (s >= seuil)
+    return (veille > seuil) & (s <= seuil)
+
+def memoire_signaux(evenements, demi_vie=2.0, max_jours=10):
+    ...
+    jours = pos - last                       # séances depuis le dernier franchissement
+    val = np.power(0.5, jours / demi_vie)    # f = 2^(-d / demi_vie)
+    out[c] = val.where(jours <= max_jours, 0.0).fillna(0.0)
+\end{code}
+
+\noindent Les noms de colonnes de \f{SIGNAUX} doivent correspondre aux clés du
+dictionnaire d'indicateurs construit dans le script (\f{"rsi"}, \f{"bb\_pct"},
+\f{"rev\_5"}, \f{"stoch"}, \f{"er"}, \f{"hist"}). Si un nom ne correspond pas, le signal
+n'est jamais déclenché et \f{prepare\_dataset} affiche un avertissement.
+
+% ---------------------------------------------------------------------------
+\subsection{Variable Selection Network}\label{sec:vsn}
+Le VSN apprend l'importance relative de chaque variable à chaque date. Pour chaque
+variable $j\in\{1,\dots,K\}$, le réseau produit un score $a^{(j)}_{i,t}$. Une fonction
+\emph{softmax} transforme ces scores en poids normalisés :
+\[
+  \alpha^{(j)}_{i,t} = \frac{\exp\left(a^{(j)}_{i,t}\right)}{\sum_{\ell=1}^{K}\exp\left(a^{(\ell)}_{i,t}\right)}.
+\]
+Les poids vérifient :
+\[
+  \alpha^{(j)}_{i,t} \ge 0 \qquad\text{et}\qquad \sum_{j=1}^{K}\alpha^{(j)}_{i,t} = 1.
+\]
+La représentation transmise au LSTM est une combinaison pondérée des représentations des
+variables :
+\[
+  \tilde{\bm{x}}_{i,t} = \sum_{j=1}^{K}\alpha^{(j)}_{i,t}\,\bm{e}^{(j)}_{i,t},
+\]
+où $\bm{e}^{(j)}_{i,t}$ représente la transformation de la variable $j$. Les poids
+$\alpha^{(j)}_{i,t}$ permettent d'interpréter les variables auxquelles le modèle accorde le
+plus d'importance à une date donnée.
+
+\paragraph{Gated Residual Network (GRN).} Les scores $a^{(j)}$ et les transformations
+$\bm{e}^{(j)}$ sont produits par des GRN. Pour une entrée $\bm{a}$ et un contexte $\bm{c}$ :
+\[
+  \bm\eta_2 = \mathrm{ELU}(W_2\bm{a} + W_3\bm{c} + \bm b_2),\quad
+  \bm\eta_1 = W_1\bm\eta_2 + \bm b_1,\quad
+  \mathrm{GRN}(\bm a,\bm c) = \mathrm{LayerNorm}\big(\bm a + \mathrm{GLU}(\bm\eta_1)\big),
+\]
+avec $\mathrm{GLU}(\bm\eta) = \sigma(W_4\bm\eta + \bm b_4)\odot(W_5\bm\eta + \bm b_5)$. La
+porte du GLU peut s'approcher de 0 : le bloc se réduit alors à l'identité, ce qui
+permet au réseau de «~sauter~» une transformation inutile.
+
+\begin{danslecode}
+\f{models.py}, classes \f{GLU}, \f{GRN} et \f{VSN}. Dans \f{VSN.forward} :
+\f{proj} donne une représentation de dimension \f{d\_model} à chaque variable,
+\f{grn\_weights} produit les scores $a^{(j)}$ (puis \f{softmax}), \f{grn\_vars} produit les
+$\bm e^{(j)}$ (un GRN par variable). La taille \f{d\_model} se règle dans
+\f{TrainConfig(d\_model=16)}. Les poids $\alpha$ sont renvoyés par \f{predict} dans les
+colonnes \f{w\_*} et résumés par \f{rapport} (feuille d'importance des variables).
+\end{danslecode}
+
+\begin{code}[sélection des variables]{models.py --- VSN.forward}
+xi = [proj(x[..., j:j + 1]) for j, proj in enumerate(self.proj)]   # 1 vecteur par variable
+flat = torch.cat(xi, dim=-1)
+weights = torch.softmax(self.grn_weights(flat, c), dim=-1)         # alpha_j, somme = 1
+xi_tilde = torch.stack([grn(e, c_vars) for grn, e in zip(self.grn_vars, xi)], dim=-2)  # e_j
+out = (weights.unsqueeze(-1) * xi_tilde).sum(dim=-2)               # x_tilde = somme alpha_j e_j
+\end{code}
+
+% ---------------------------------------------------------------------------
+\subsection{Score macroéconomique : variable de contexte}\label{sec:score}
+Le score macroéconomique décrit le régime de marché dans lequel la prévision est réalisée.
+Le score choisi pour ce modèle est le score niveau, et les variables utilisées pour le
+calculer sont les suivantes :
+\begin{itemize}[nosep,label=-]
+  \item Philadelphia Fed Business Outlook ;
+  \item Chicago Fed National Activity Index ;
+  \item permis de construire américains ;
+  \item ISM Manufacturing PMI ;
+  \item variation des emplois non agricoles ;
+  \item variation de l'indice des prix PCE ;
+  \item Chicago PMI ;
+  \item taux de chômage américain ;
+  \item production industrielle, en variation annuelle.
+\end{itemize}
+Ces indicateurs sont des indicateurs avancés du PIB américain (consulter le \f{readme
+score.md} pour plus d'informations sur les indicateurs avancés et la construction du
+score). Le calcul du score est dans \f{cycle-score.py} du dossier \f{update-score}. Tout
+ce qui y est renseigné est «~frais~» (et peut ne pas coller avec les exemples et
+commentaires du readme). Pour mettre à jour le score, remplacer le fichier
+\f{Data-in-value.csv} par les nouvelles données et lancer \f{calcul-score-macro.py}. Le
+nouveau fichier est \f{score\_updated.csv}.
+
+Le score fournit au modèle un contexte permettant de distinguer, par exemple, un signal
+technique observé dans un régime favorable du même signal observé dans un régime
+défavorable : c'est une variable de contexte dans le modèle. Il n'est pas sélectionné
+par le VSN comme les autres variables ; il modifie la façon dont le VSN pondère et lit
+les signaux.
+
+\paragraph{Délai de publication.} Le score du mois $M$ n'est connu qu'après la publication
+de ses composantes. Il n'est utilisé qu'à partir de la fin du mois $M$ plus 30 jours ;
+chaque séance reçoit le dernier score déjà publié à cette date.
+
+\begin{danslecode}
+\textbf{Chargement} : \f{load\_macro("score\_updated.csv", date\_col="periode\_M")} dans
+\f{data\_prep.py}. Le délai se règle avec \f{publication\_lag\_days} (défaut 30). La
+fonction ajoute aussi la variation mensuelle \f{score\_niveau\_chg}.
+
+\textbf{Contexte} : \f{regime\_col="score\_niveau"} dans \f{reglages}. Toutes les colonnes
+du score passent alors en contexte, et deux indicatrices sont ajoutées :
+\f{regime\_bas} (score $<25$) et \f{regime\_eleve} (score $>75$), seuils réglables par
+\f{seuils\_regime=(25, 75)}. Sans \f{regime\_col}, le score serait une variable ordinaire
+lue par le VSN.
+
+\textbf{Filtre optionnel} : \f{score\_min=25} (et/ou \f{score\_max}) dans \f{reglages}. Les
+jours hors domaine sont étiquetés \f{"hors\_score"} : le modèle n'y apprend pas et n'y
+prédit pas, donc la stratégie n'y achète pas. \f{filtre\_sur=("val","test","live")}
+garde l'apprentissage sur toutes les périodes et n'applique le filtre qu'aux décisions.
+Désactivé dans la version actuelle.
+\end{danslecode}
+
+\begin{code}[le score comme contexte]{models.py --- VSNLSTM.forward}
+c_r = self.grn_regime(self.regime_proj(regime))   # score -> vecteur de contexte c_t
+xi, weights = self.vsn(x, c_r)                    # le contexte entre dans le VSN (poids + GRN_j)
+...
+z = self.grn_out(h[:, -1], c_r[:, -1])            # et dans le GRN de sortie
+\end{code}
+
+% ---------------------------------------------------------------------------
+\subsection{Découpage temporel}\label{sec:decoupage}
+\subsubsection{Les trois ensembles}
+Les données sont séparées chronologiquement en trois ensembles :
+\begin{enumerate}[nosep]
+  \item un ensemble d'entraînement utilisé pour estimer les paramètres ;
+  \item un ensemble de validation utilisé pour choisir les hyperparamètres et les seuils de décision ;
+  \item un ensemble de test utilisé pour évaluer la performance finale.
+\end{enumerate}
+Le découpage doit respecter l'ordre temporel :
+\[
+  \text{Entraînement} \longrightarrow \text{Validation} \longrightarrow \text{Test}.
+\]
+La cible d'une date $t$ utilise le prix en $t+H$. Les $H$ dernières séances de
+l'entraînement (et de la validation) ont donc une cible qui déborde sur la période
+suivante : elles sont retirées (\emph{purge}) pour éviter toute fuite d'information.
+La normalisation des variables de prix (z-score, écrêté à $\pm 5$) est estimée sur
+l'entraînement seulement, puis appliquée telle quelle aux autres périodes.
+
+Un échantillon est une fenêtre des $T=20$ dernières séances d'un seul titre, avec la
+fraîcheur de chaque signal et le contexte du score à chaque séance. Le modèle est commun
+à toutes les actions : les fenêtres de tous les titres sont mélangées, ce qui multiplie
+le nombre d'exemples de chaque signal. Les fenêtres sont présentées au modèle par paquets
+de 256, appelés \emph{batchs}.
+
+\begin{danslecode}
+\textbf{Dates} : dans \f{reglages} du script.
+\begin{itemize}[nosep]
+  \item \f{train\_start} : début de l'entraînement (les dates antérieures servent seulement
+  à remplir l'historique des premières fenêtres) ;
+  \item \f{train\_end} : fin de l'entraînement ; \f{val\_end} : fin de la validation ;
+  \item tout ce qui suit \f{val\_end} est le test ; les $H$ dernières séances, sans cible,
+  sont étiquetées \f{"live"} et servent aux décisions du jour.
+\end{itemize}
+Le découpage est fait par \f{time\_split} (\f{data\_prep.py}) ; l'étiquette de chaque ligne
+est dans la colonne \f{split} de \f{data.df}.
+
+\textbf{Fenêtres et batchs} : \f{make\_loaders(data, window=FENETRE, batch\_size=256)}
+dans \f{windows.py}. Une fenêtre est rejetée si elle contient un trou de plus de 7 jours
+calendaires (\f{max\_gap\_days}).
+\end{danslecode}
+
+\begin{code}[préparation et fenêtres]{script\_xlk.py}
+reglages = dict(train_start="2005-01-01", train_end="2016-12-31", val_end="2019-12-31",
+                horizon=HORIZON, target="direction", signaux=True,
+                indicator_field_level=0, regime_col="score_niveau")
+
+data    = prepare_dataset(prices, indicateurs, score, **reglages)
+loaders = make_loaders(data, window=FENETRE, batch_size=256)   # {"train", "val", "test"}
+print(data.df["split"].value_counts())                         # contrôle du découpage
+\end{code}
+
+\subsubsection{Les époques, la validation et l'arrêt}\label{sec:epoques}
+Une époque est un passage complet sur toutes les fenêtres d'entraînement. Avec 30 titres
+sur 12 ans, on obtient environ 90\,000 fenêtres, soit environ 350 batchs, c'est-à-dire
+350 ajustements des paramètres par époque.
+
+Entraînement et validation alternent : à la fin de chaque époque, on mesure l'erreur de
+prédiction sur la période de validation, sans modifier les paramètres. Si l'erreur est la
+plus basse observée, les paramètres sont mis en réserve. L'erreur de validation est
+d'abord décroissante, puis croissante quand le modèle commence à surapprendre. Après 8
+époques consécutives sans amélioration, on arrête et on retient les paramètres mis en
+réserve. L'optimiseur est Adam ; le pas d'apprentissage est divisé par 2 après 4 époques
+sans amélioration, et la norme du gradient est plafonnée à 1 (\emph{gradient clipping}).
+
+\begin{danslecode}
+\f{TrainConfig} dans \f{train.py}, instancié dans le script :
+\begin{itemize}[nosep]
+  \item \f{patience=8} : époques sans amélioration avant l'arrêt ;
+  \item \f{max\_epochs=100} : plafond d'époques ;
+  \item \f{lr=1e-3}, \f{lr\_patience=4}, \f{lr\_factor=0.5} : pas d'apprentissage et sa réduction ;
+  \item \f{dropout=0.2}, \f{weight\_decay=1e-5} : régularisation ;
+  \item \f{grad\_clip=1.0} ; \f{seed=42} (reproductibilité).
+\end{itemize}
+\f{train(loaders, cfg, save\_path="modele\_proba.pt")} enregistre les meilleurs poids
+dans le fichier \f{.pt}. \f{load\_model("modele\_proba.pt")} les recharge sans réentraîner.
+\end{danslecode}
+
+\begin{code}[entraînement]{script\_xlk.py}
+cfg = TrainConfig(task="proba", d_model=16, dropout=0.2, patience=8)
+model, history = train(loaders, cfg, save_path=FICHIER_MODELE)   # .pt = meilleurs poids
+rapport(FICHIER_MODELE, loaders, split="val", out_dir="resultats_proba", data=data)
+\end{code}
+
+% ---------------------------------------------------------------------------
+\subsection{Choix de l'horizon}\label{sec:horizons}
+L'horizon $H$ est choisi en comparant plusieurs valeurs sur la validation : pour chaque
+horizon, on prépare les données, on entraîne un modèle (régression logistique rapide ou
+réseau complet), puis on évalue l'AUC et la stratégie après frais.
+
+\begin{danslecode}
+\f{comparer\_horizons} dans \f{horizons.py}. Les horizons testés se passent dans
+\f{horizons=(...)} ; \f{methode="logistique"} (rapide) ou \f{"reseau"} (VSN-LSTM, plusieurs
+minutes par horizon). Les autres arguments de \f{prepare\_dataset} sont transmis tels quels
+(\f{**reglages}, sans \f{horizon}). L'horizon retenu est ensuite reporté dans
+\f{HORIZON} en tête du script. Attention : cette fonction évalue la stratégie avec le
+backtest simple de \f{decision.py} (détention fixe de $H$ séances), pas avec la stratégie
+portefeuille de la section~\ref{sec:backtest}.
+\end{danslecode}
+
+\begin{code}[comparaison des horizons]{horizons.py}
+from horizons import comparer_horizons
+r = {k: v for k, v in reglages.items() if k != "horizon"}
+tab = comparer_horizons(prices, indicateurs, score, horizons=(5, 10, 15, 22, 30),
+                        methode="logistique", window=FENETRE, couts_bps=5,
+                        entree="cloture", **r)
+print(tab.to_string())
+\end{code}
+
+% ---------------------------------------------------------------------------
+\subsection{Seuils et backtest}
+\subsubsection{Choix des seuils}\label{sec:seuils}
+Le modèle figé calcule ses probabilités sur la période de validation. La fonction
+\f{choisir\_seuils\_portefeuille} essaie plusieurs couples de seuils candidats (achat,
+sortie) ; pour chacun, elle simule la stratégie complète et classe les couples par
+ratio de Sharpe net de frais (rendement rapporté à la volatilité). Les seuils d'achat
+candidats sont, par défaut, les quantiles 70\,\%, 80\,\%, 90\,\% et 95\,\% des probabilités
+de validation ; les seuils de sortie sont 0,50, la médiane des probabilités et
+«~aucun~» (sortie par le stop seulement). Le script retient la première ligne du
+tableau ; il faut vérifier qu'elle se trouve sur un plateau (des seuils voisins donnent
+des résultats proches) et non sur un pic isolé. Le test n'est regardé qu'une fois, avec
+les seuils figés.
+
+\begin{danslecode}
+Fonction \f{choisir\_seuils\_portefeuille} (\f{Portefeuille.py}). Paramètres :
+\f{grille\_achat}, \f{grille\_sortie} (listes de seuils), \f{min\_trades} (nombre minimal de
+trades pour qu'une combinaison soit «~évaluable~», 10 dans le script), plus les mêmes
+options que le backtest (\f{**OPTIONS}). Les seuils retenus sont enregistrés dans
+\f{seuils.json} et relus pour les décisions du jour. Une grille grossière limite le
+surapprentissage : plus on teste de combinaisons, plus la meilleure est flatteuse.
+\end{danslecode}
+
+\begin{code}[choix des seuils sur la validation]{script\_xlk.py}
+grille = choisir_seuils_portefeuille(predict(model, loaders["val"]), prices,
+                                     min_trades=10, **OPTIONS)
+# grille personnalisée : ajouter grille_achat=[0.55, 0.6, 0.65], grille_sortie=[0.4, 0.5]
+print(grille.head(10).round(3).to_string())
+seuil_achat  = float(grille.iloc[0]["seuil_achat"])
+ss           = grille.iloc[0]["seuil_sortie"]
+seuil_sortie = None if isinstance(ss, str) else float(ss)        # "aucun (stop seul)"
+json.dump({"seuil_achat": seuil_achat, "seuil_sortie": seuil_sortie}, open(FICHIER_SEUILS, "w"))
+\end{code}
+
+\subsubsection{Règles de la stratégie et backtest}\label{sec:backtest}
+La prise de décision est la suivante. Lorsqu'on lance la simulation, on compare
+$\hat p_{i,t}$ au seuil d'achat. Si la probabilité est supérieure, on prend la position
+au dernier cours disponible : si l'on simule le modèle à 17\,h, le cours qui sert à
+calculer la probabilité et à acheter est le même, celui de 17\,h. Cela évite le
+\emph{gap} d'ouverture du lendemain. Dans le backtest, ce cours est la clôture.
+
+Le portefeuille peut détenir au maximum deux fois plus de positions que de titres (et au
+plus 10), avec au plus deux positions par titre dont les signaux d'achat sont séparés
+d'au moins 3 séances (exemple : aujourd'hui j'ai un signal sur Schneider ; 4 séances plus
+tard j'en ai un autre, sans signal de vente entre-temps : je rachète une deuxième ligne).
+Au plus deux achats sont faits par jour, en priorité les plus fortes probabilités.
+
+Un titre sort :
+\begin{itemize}[nosep]
+  \item lorsque sa probabilité de hausse est inférieure au seuil de sortie : toutes ses
+  lignes sont vendues ;
+  \item ou, si le stop est activé, lorsque le cours touche $\text{prix d'achat} - k\times\text{ATR}$
+  (calculé ligne par ligne, avec l'ATR du jour d'achat).
+\end{itemize}
+Il n'y a pas de sortie au bout d'une durée fixe. Le capital est découpé en autant de
+tranches que \f{max\_positions} : chaque achat investit $1/\f{max\_positions}$ de la valeur
+courante du portefeuille, le reste attend en liquidités (rémunérées à 0\,\%). Les frais
+(\f{couts\_bps}) sont prélevés à l'achat et à la vente. La référence est l'achat et la
+conservation des mêmes titres, équipondérés, frais compris.
+
+\begin{danslecode}
+\textbf{Options de la stratégie} : dictionnaire renvoyé par la fonction \f{options} du
+script, transmis tel quel au choix des seuils, au backtest et aux décisions du jour.
+\begin{itemize}[nosep]
+  \item \f{max\_positions} : nombre de lignes simultanées (taille d'une ligne $=1/$\f{max\_positions}) ;
+  \item \f{max\_par\_titre=2}, \f{ecart\_min=3} : lignes par titre et écart minimal entre deux achats ;
+  \item \f{max\_entrees\_jour=2} : achats par jour ;
+  \item \f{stop\_atr=2}, \f{atr=...} : stop à 2 ATR ; \f{stop\_atr=None} le désactive ;
+  \item \f{duree\_max=None} : pas de sortie au temps (un entier la réactive) ;
+  \item \f{couts\_bps=5} : frais par transaction, en points de base ;
+  \item \f{entree="cloture"} : exécution au cours qui a servi au calcul (\f{"ouverture"} :
+  à l'ouverture suivante) ;
+  \item \f{recroisement=True} (optionnel) : la 2\textsuperscript{e} ligne exige que la
+  probabilité soit repassée sous le seuil d'achat entre-temps.
+\end{itemize}
+\textbf{Backtest} : \f{backtest\_portefeuille} puis \f{rapport\_portefeuille}
+(Excel + graphique dans \f{out\_dir}).
+\end{danslecode}
+
+\begin{code}[options et backtest sur le test]{script\_xlk.py}
+def options(atr):
+    return dict(couts_bps=5, entree="cloture",
+                stop_atr=2, atr=atr,                     # stop_atr=None : stop désactivé
+                max_par_titre=2, ecart_min=3,
+                max_positions=min(10, 2 * len(prices)),  # chaque ligne = 1/max_positions
+                max_entrees_jour=2,
+                duree_max=None)                          # sortie : signal ou stop
+
+bt = backtest_portefeuille(predict(model, loaders["test"]), prices,
+                           seuil_achat, seuil_sortie, **OPTIONS)
+print(rapport_portefeuille(bt, out_dir="backtest_etf_tech").round(3).to_string())
+\end{code}
+
+\paragraph{Lecture du backtest.} Le rendement annuel de la stratégie doit être comparé à
+celui de la référence en tenant compte de l'exposition : une stratégie investie 30\,\% du
+temps sur un actif qui fait 19\,\% par an rapporte environ 5,7\,\% si elle choisit ses jours
+au hasard. Les critères pertinents sont le ratio de Sharpe net, la perte maximale, la
+part du temps investie (\f{exposition moyenne}) et le rendement rapporté à cette
+exposition.
+
+% ===========================================================================
+\section{Le modèle récurrent}\label{sec:lstm}
+% ===========================================================================
+\subsection{RNN et disparition du gradient}
+Un réseau de neurones récurrent, ou RNN, lit une séquence pas de temps par pas de temps.
+À chaque date, il met à jour un état caché $\bm h_t$ qui résume les informations
+observées dans le passé.
+
+\subsubsection{Équation du RNN}
+L'état caché est défini par :
+\[
+  \bm h_t = \tanh\left(W_h\bm h_{t-1} + W_x\bm x_t + \bm b_h\right),
+\]
+où :
+\begin{itemize}[nosep,label=---]
+  \item $\bm x_t$ est le vecteur des variables à la date $t$ ;
+  \item $\bm h_{t-1}$ est l'état caché de la date précédente ;
+  \item $W_x$ est la matrice des poids appliquée aux variables ;
+  \item $W_h$ est la matrice des poids récurrents ;
+  \item $\bm b_h$ est le vecteur de biais ;
+  \item $\tanh$ est la fonction d'activation tangente hyperbolique.
+\end{itemize}
+La prédiction dépend donc à la fois de l'information actuelle $\bm x_t$ et du résumé du
+passé $\bm h_{t-1}$.
+
+\subsubsection{Rétropropagation dans le temps}
+Pour entraîner un RNN, le réseau est déroulé dans le temps. Chaque pas de temps peut être
+interprété comme une couche d'un réseau profond. Le gradient de la perte finale
+$\mathcal L_T$ par rapport à un état caché lointain $\bm h_k$ s'écrit :
+\[
+  \frac{\partial\mathcal L_T}{\partial\bm h_k} = \frac{\partial\mathcal L_T}{\partial\bm h_T}
+  \prod_{t=k+1}^{T}\frac{\partial\bm h_t}{\partial\bm h_{t-1}}.
+\]
+Pour un RNN utilisant la fonction $\tanh$, le jacobien local est :
+\[
+  \frac{\partial\bm h_t}{\partial\bm h_{t-1}} = \mathrm{diag}\left(1-\bm h_t^2\right)W_h.
+\]
+La rétropropagation doit donc multiplier un grand nombre de matrices lorsque la distance
+$T-k$ est importante.
+
+\subsubsection{Disparition du gradient}
+Supposons que la norme de chaque jacobien soit majorée par une constante $\gamma$ :
+\[
+  \left\|\frac{\partial\bm h_t}{\partial\bm h_{t-1}}\right\| \le \gamma.
+\]
+On obtient alors :
+\[
+  \left\|\frac{\partial\mathcal L_T}{\partial\bm h_k}\right\| \le
+  \left\|\frac{\partial\mathcal L_T}{\partial\bm h_T}\right\|\gamma^{T-k}.
+\]
+Si $0<\gamma<1$, alors $\gamma^{T-k}$ converge exponentiellement vers zéro lorsque la
+distance temporelle $T-k$ augmente. Le gradient reçu par les états anciens devient donc
+presque nul. Le réseau ne parvient plus à modifier correctement les poids responsables des
+informations lointaines. Ce phénomène est appelé \textbf{disparition du gradient}. À
+l'inverse, si $\gamma>1$, le produit peut devenir très grand. On parle alors
+d'\textbf{explosion du gradient}, que l'on limite en plafonnant la norme du gradient
+(\f{grad\_clip} dans \f{TrainConfig}).
+
+\subsection{Long Short-Term Memory}
+Le LSTM est une extension du RNN conçue pour mieux conserver les dépendances temporelles
+longues. En plus de l'état caché $\bm h_t$, le LSTM introduit un état de cellule $\bm c_t$.
+Cet état constitue la mémoire interne de long terme du réseau. La mémoire est mise à jour
+par une combinaison d'additions et de produits élément par élément. Cette structure crée
+un chemin plus direct pour la propagation du gradient. À chaque date, le LSTM calcule
+successivement :
+\begin{enumerate}[nosep]
+  \item une porte d'oubli ;
+  \item une porte d'entrée ;
+  \item un candidat mémoire ;
+  \item une porte de sortie.
+\end{enumerate}
+On définit le vecteur concaténé :
+\[
+  \bm z_t = \begin{bmatrix}\bm h_{t-1}\\ \bm x_t\end{bmatrix}.
+\]
+
+\subsubsection{Porte d'oubli}
+La porte d'oubli est définie par :
+\[
+  \bm f_t = \sigma\left(W_f\bm z_t + \bm b_f\right),
+\]
+où $\sigma$ est la fonction sigmoïde :
+\[
+  \sigma(x) = \frac{1}{1+e^{-x}}.
+\]
+Chaque composante de $\bm f_t$ appartient à l'intervalle $[0,1]$.
+\begin{itemize}[nosep,label=---]
+  \item Si une composante est proche de 1, l'information correspondante est conservée.
+  \item Si une composante est proche de 0, l'information correspondante est effacée.
+\end{itemize}
+Dans un contexte financier, cette porte peut permettre au modèle d'oublier un régime de
+marché devenu obsolète après une rupture macroéconomique ou un changement important de
+volatilité.
+
+\subsubsection{Porte d'entrée}
+La porte d'entrée détermine la quantité de nouvelle information qui doit être ajoutée à
+la mémoire :
+\[
+  \bm i_t = \sigma\left(W_i\bm z_t + \bm b_i\right).
+\]
+Une valeur proche de 1 autorise l'enregistrement de la nouvelle information. Une valeur
+proche de 0 empêche cette information de modifier la mémoire. Par exemple, le modèle peut
+décider d'accorder une importance particulière à un signal apparu le jour de la
+publication des résultats d'une entreprise.
+
+\subsubsection{Candidat mémoire}
+Le candidat mémoire représente la nouvelle information susceptible d'être enregistrée :
+\[
+  \tilde{\bm c}_t = \tanh\left(W_c\bm z_t + \bm b_c\right).
+\]
+Comme la fonction $\tanh$ prend ses valeurs dans l'intervalle $[-1,1]$, le candidat
+mémoire contient à la fois :
+\begin{itemize}[nosep,label=---]
+  \item le signe de l'information ;
+  \item l'intensité de l'information.
+\end{itemize}
+Dans le cas financier, une valeur positive peut représenter une information favorable,
+tandis qu'une valeur négative peut représenter une information défavorable.
+
+\subsubsection{Mise à jour de la cellule mémoire}
+La nouvelle mémoire est calculée par :
+\[
+  \bm c_t = \bm f_t\odot\bm c_{t-1} + \bm i_t\odot\tilde{\bm c}_t,
+\]
+où $\odot$ représente le produit élément par élément. Cette équation contient deux parties :
+\[
+  \underbrace{\bm f_t\odot\bm c_{t-1}}_{\text{mémoire ancienne conservée}}
+  \;+\;
+  \underbrace{\bm i_t\odot\tilde{\bm c}_t}_{\text{nouvelle information ajoutée}}.
+\]
+Le LSTM peut donc conserver une information ancienne tout en ajoutant sélectivement de
+nouvelles informations.
+
+\subsubsection{Porte de sortie}
+La porte de sortie détermine la partie de la mémoire qui doit être transmise à l'état
+caché :
+\[
+  \bm o_t = \sigma\left(W_o\bm z_t + \bm b_o\right).
+\]
+L'état caché est ensuite calculé par :
+\[
+  \bm h_t = \bm o_t\odot\tanh(\bm c_t).
+\]
+L'état $\bm h_t$ constitue la représentation visible du LSTM à la date $t$, tandis que
+$\bm c_t$ représente sa mémoire interne.
+
+\subsubsection{Résumé des équations du LSTM}
+Les équations complètes peuvent être regroupées ainsi :
+\begin{align}
+  \bm f_t &= \sigma\left(W_f\bm z_t + \bm b_f\right),\\
+  \bm i_t &= \sigma\left(W_i\bm z_t + \bm b_i\right),\\
+  \tilde{\bm c}_t &= \tanh\left(W_c\bm z_t + \bm b_c\right),\\
+  \bm c_t &= \bm f_t\odot\bm c_{t-1} + \bm i_t\odot\tilde{\bm c}_t,\\
+  \bm o_t &= \sigma\left(W_o\bm z_t + \bm b_o\right),\\
+  \bm h_t &= \bm o_t\odot\tanh(\bm c_t).
+\end{align}
+
+\subsubsection{Pourquoi le LSTM limite la disparition du gradient}
+La dérivée de la cellule mémoire par rapport à la cellule précédente contient
+directement la porte d'oubli :
+\[
+  \frac{\partial\bm c_t}{\partial\bm c_{t-1}} = \bm f_t.
+\]
+Sur plusieurs périodes, le gradient contient donc le produit :
+\[
+  \frac{\partial\bm c_T}{\partial\bm c_k} = \prod_{t=k+1}^{T}\bm f_t.
+\]
+Lorsque les composantes des portes d'oubli restent proches de 1, le gradient peut
+circuler sur une longue période sans disparaître immédiatement. Le LSTM n'élimine pas
+totalement le problème de disparition du gradient, mais son architecture lui permet de
+mieux préserver les dépendances longues qu'un RNN simple.
+
+\begin{danslecode}
+Le LSTM n'est pas recodé : c'est \f{nn.LSTM} de PyTorch, créé dans \f{VSNLSTM.\_\_init\_\_}
+(\f{models.py}). Il reçoit la sortie du VSN, de dimension \f{d\_model}. Le nombre de
+couches empilées se règle par \f{TrainConfig(n\_layers=1)}. Après le LSTM, un bloc
+\f{GateAddNorm} ajoute un saut résiduel : si le LSTM n'apporte rien, la sortie du VSN
+passe directement.
+\end{danslecode}
+
+\subsection{Couche de prédiction}
+Après avoir traité une fenêtre de $T$ séances, le modèle utilise le dernier état caché
+$\bm h_T$, enrichi par un dernier GRN qui reçoit le contexte du score, pour produire un
+logit :
+\[
+  z_{i,t} = \bm w_p^\top\,\mathrm{GRN}(\bm h_{i,T},\bm c_T) + b_p.
+\]
+La probabilité de hausse est obtenue avec une fonction sigmoïde :
+\[
+  \hat p_{i,t} = \sigma(z_{i,t}) = \frac{1}{1+\exp(-z_{i,t})}.
+\]
+La décision de trading peut ensuite être définie à partir d'un seuil d'entrée $s_{\text{achat}}$ :
+\[
+  \text{Décision}_{i,t} = \begin{cases}\text{acheter}, & \text{si } \hat p_{i,t}\ge s_{\text{achat}},\\
+  \text{ne pas acheter}, & \text{sinon.}\end{cases}
+\]
+Le seuil ne doit pas nécessairement être égal à 0,5. Il est sélectionné sur l'échantillon
+de validation afin de maximiser une mesure de performance après prise en compte des
+coûts de transaction (section~\ref{sec:seuils}).
+
+\subsection{Synthèse de l'architecture V-LSTM}
+Le fonctionnement général du modèle peut être résumé par la chaîne suivante :
+\[
+  \text{Variables brutes}\longrightarrow\text{signaux et fraîcheur}\longrightarrow\text{VSN}
+  \longrightarrow\text{LSTM}\longrightarrow\text{couche linéaire}\longrightarrow\hat p_{i,t}.
+\]
+À chaque séance de la fenêtre :
+\begin{itemize}[nosep,label=-]
+  \item le score est transformé en un vecteur de contexte $\bm c_t$ ;
+  \item le VSN calcule un poids pour chaque signal, $\bm v_t = \mathrm{Softmax}(\mathrm{GRN}(\Xi_t,\bm c_t))$ :
+  poids positifs, de somme 1, recalculés chaque jour selon les signaux et le score ;
+  \item chaque signal est «~lu~» par son propre GRN, qui reçoit lui aussi le contexte :
+  $\tilde\xi^{(j)}_{t} = \mathrm{GRN}_j(\xi^{(j)}_{t},\bm c_t)$ ; c'est ici qu'un franchissement
+  peut être interprété différemment selon le score ;
+  \item les 20 séances résumées passent dans un LSTM qui capte l'enchaînement des signaux
+  dans le temps ;
+  \item un dernier GRN, enrichi du contexte, produit un vecteur $\bm z$, puis la probabilité
+  $\hat p = \sigma(\bm w^\top\bm z + b)$.
+\end{itemize}
+Le VSN répond à la question :
+\begin{center}\emph{Quelles variables sont importantes à cette date ?}\end{center}
+Le LSTM répond à la question :
+\begin{center}\emph{Comment ces informations ont-elles évolué au cours des dernières séances ?}\end{center}
+La couche finale transforme ensuite la représentation temporelle en une probabilité de
+hausse à l'horizon $H$.
+
+\begin{code}[la chaîne complète du réseau]{models.py --- VSNLSTM.forward}
+c_r = self.grn_regime(self.regime_proj(regime))   # 1. score -> contexte c_t        (B, T, d)
+xi, weights = self.vsn(x, c_r)                    # 2. VSN : poids + GRN_j          (B, T, d)
+h, _ = self.lstm(xi, state)                       # 3. LSTM sur les T séances       (B, T, d)
+h = self.post_lstm(h, residual=xi)                #    saut résiduel à porte
+z = self.grn_out(h[:, -1], c_r[:, -1])            # 4. dernière séance + contexte   (B, d)
+pred = self.head(z)                               # 5. logit ; proba = sigmoid(logit)
+return {"prediction": pred, "vsn_weights": weights}
+\end{code}
+
+% ===========================================================================
+\section{Mise en œuvre : le script principal}\label{sec:pipeline}
+% ===========================================================================
+Le script \f{script\_xlk.py} enchaîne toutes les étapes. Il se compose de trois parties :
+les réglages, le bloc 1 (exécuté une fois) et le bloc 2 (exécuté chaque jour).
+
+\subsection{Réglages}
+\begin{code}[en-tête du script]{script\_xlk.py}
+ENTRAINER = True            # True : bloc 1 + bloc 2 ; False : bloc 2 seulement
+TICKERS   = ["XLK"]         # univers de titres
+DATE      = "2005-01-01"    # début du téléchargement des prix
+HORIZON   = 22              # H, en séances
+FENETRE   = 20              # T, en séances
+FICHIER_MODELE = "modele_proba.pt"
+FICHIER_SEUILS = "seuils.json"
+
+cours_now = {"XLK": 182.5}  # cours du moment (dernier cours disponible)
+mon_portefeuille = {}       # lignes détenues, ex. {"XLK": [{"date": "2026-10-20", "prix": 180.1}]}
+
+reglages = dict(train_start="2005-01-01", train_end="2016-12-31", val_end="2019-12-31",
+                horizon=HORIZON, target="direction", signaux=True,
+                indicator_field_level=0,
+                regime_col="score_niveau",
+                # score_min=25,
+                )
+\end{code}
+
+\subsection{Données et indicateurs}
+Les prix sont téléchargés avec \f{yfinance} (\f{auto\_adjust=True}) et stockés dans un
+dictionnaire \f{prices = \{titre: DataFrame Open/High/Low/Close/Volume\}}. Les indicateurs
+sont calculés par \f{construire\_indicateurs}, qui appelle le code d'indicateurs du projet
+(\f{construire\_panels}) et renomme les colonnes selon les noms attendus par
+\f{signaux.py}. L'ATR est extrait à part pour le stop. Le score n'est pas mis parmi les
+indicateurs : il passe par l'argument \f{macro} de \f{prepare\_dataset}.
+
+\begin{code}[indicateurs]{script\_xlk.py}
+def construire_indicateurs(prices_):
+    pan = construire_panels(prices_, Indicateurs, ParamsPF(min_titres=1),
+                            generateur=features_completes)
+    ind = {"rsi": pan["rsi"], "bb_pct": pan["bollinger_pct_b"], "rev_5": pan["rev_5"],
+           "stoch": pan["stoch"], "er": pan["er"], "hist": pan["hist"]}
+    return pd.concat(ind, axis=1, names=["Indicator", "Ticker"]), pan["atr"]
+\end{code}
+
+\noindent Pour ajouter un indicateur : le calculer dans le code d'indicateurs, l'ajouter
+au dictionnaire \f{ind} sous un nom, puis ajouter les règles correspondantes dans
+\f{SIGNAUX} avec ce même nom dans \f{col}.
+
+\subsection{Bloc 1 : entraînement, seuils, test (une fois)}
+Exécuté avec \f{ENTRAINER = True}, sur les clôtures :
+\begin{enumerate}[nosep]
+  \item \f{prepare\_dataset} : variables, cible, découpage (section~\ref{sec:decoupage}) ;
+  \item \f{make\_loaders} : fenêtres et batchs ;
+  \item \f{train} : entraînement, meilleurs poids dans \f{modele\_proba.pt} ;
+  \item \f{rapport} : diagnostic sur la validation (dossier \f{resultats\_proba}) ;
+  \item \f{choisir\_seuils\_portefeuille} : seuils sur la validation, enregistrés dans \f{seuils.json} ;
+  \item \f{backtest\_portefeuille} et \f{rapport\_portefeuille} : test, regardé une seule fois
+  (dossier \f{backtest\_etf\_tech}).
+\end{enumerate}
+
+\paragraph{Lire le rapport de validation.} Le dossier \f{resultats\_proba} contient un
+fichier Excel et des graphiques : AUC (0,5 = hasard ; 0,52 à 0,55 est réaliste pour ce
+type de problème), gain de log-loss par rapport à une prévision constante, courbe de
+calibration (fréquence de hausse observée par tranche de probabilité), importance moyenne
+des variables (poids du VSN) et lecture par régime de score. Un gain de log-loss positif
+ne garantit pas une stratégie rentable : il peut venir des jours où la stratégie
+n'achète pas, et la cible mesure le sens de variation, pas son ampleur.
+
+\subsection{Bloc 2 : décisions du jour}
+Exécuté à chaque lancement, au moment de la décision. Les données téléchargées s'arrêtent
+à la dernière clôture ; \f{figer\_seance} ajoute la séance du jour avec le cours du moment
+comme clôture, puis les indicateurs sont recalculés sur ces prix. Le modèle et les seuils
+sont relus depuis les fichiers du bloc 1.
+
+\begin{code}[décisions du jour]{script\_xlk.py}
+prices_jour = figer_seance(prices, cours_now)          # Close du jour = cours du moment
+indicateurs_jour, atr_jour = construire_indicateurs(prices_jour)
+data_jour = prepare_dataset(prices_jour, indicateurs_jour, score, **reglages)  # mêmes reglages
+model, _ = load_model(FICHIER_MODELE)
+s = json.load(open(FICHIER_SEUILS))
+
+dec = decisions_portefeuille_du_jour(model, data_jour, FENETRE, mon_portefeuille,
+                                     s["seuil_achat"], s["seuil_sortie"],
+                                     prices=prices_jour, **options(atr_jour))
+print(dec["vendre"].to_string()); print(dec["garder"].to_string()); print(dec["acheter"].to_string())
+\end{code}
+
+\noindent Le résultat contient quatre tableaux : \f{vendre} (lignes à vendre et motif),
+\f{garder}, \f{acheter} (nouvelle ligne ou deuxième ligne) et \f{toutes les probabilités}.
+La colonne \f{date des données} doit afficher la date du jour pour tous les titres ; un
+titre absent de \f{cours\_now} est évalué sur sa dernière clôture. Après avoir passé les
+ordres, on met à jour \f{mon\_portefeuille} :
+\begin{code}[format du portefeuille]{script\_xlk.py}
+mon_portefeuille = {"CAT":   [{"date": "2026-10-20", "prix": 352.1},     # deux lignes
+                              {"date": "2026-10-26", "prix": 360.4}],
+                    "MC.PA": {"date": "2026-10-15", "prix": 698.5}}      # une ligne
+\end{code}
+
+\subsection{Règles de cohérence}
+\begin{itemize}[nosep]
+  \item \f{reglages}, \f{FENETRE}, les options de la stratégie, le fichier \f{.pt} et
+  \f{seuils.json} doivent être identiques entre le bloc 1 et le bloc 2.
+  \item Toute modification de \f{reglages}, de \f{signaux.py} ou des indicateurs impose de
+  réentraîner (bloc 1). Une modification des seuls paramètres de la stratégie impose de
+  refaire le choix des seuils (le modèle peut être rechargé avec \f{load\_model} au lieu
+  d'appeler \f{train}).
+  \item \f{figer\_seance} met le volume du jour à NaN (volume partiel). Si un indicateur ou
+  \f{volume\_rel} en dépend, utiliser \f{volume="garder"} ou \f{variables\_prix=False}.
+  \item Après le remplacement d'un module, redémarrer le noyau Python pour éviter de
+  mélanger deux versions.
+  \item Hors Jupyter, afficher les tableaux avec \f{print(df.to\_string())}.
+\end{itemize}
+
+% ===========================================================================
+\section{Récapitulatif des paramètres}\label{sec:parametres}
+% ===========================================================================
+\small
+\begin{longtable}{@{}>{\raggedright\arraybackslash}p{3.3cm} >{\raggedright\arraybackslash}p{4.3cm} >{\raggedright\arraybackslash}p{2.1cm} >{\raggedright\arraybackslash}p{5.0cm}@{}}
+\toprule
+\textbf{Paramètre} & \textbf{Où le modifier} & \textbf{Valeur} & \textbf{Effet} \\
+\midrule
+\endhead
+\multicolumn{4}{@{}l}{\emph{Données et cible}}\\
+\f{TICKERS}        & en-tête du script & \f{["XLK"]} & univers de titres \\
+\f{HORIZON}        & en-tête du script & 22 & $H$ ; réentraîner \\
+\f{FENETRE}        & en-tête du script & 20 & $T$ ; réentraîner \\
+\f{train\_start}, \f{train\_end}, \f{val\_end} & \f{reglages} & 2005 / 2016 / 2019 & découpage temporel ; réentraîner \\
+\f{target}         & \f{reglages} & \f{"direction"} & cible binaire ($y$) \\
+\midrule
+\multicolumn{4}{@{}l}{\emph{Signaux et variables}}\\
+seuils, sens, colonnes & \f{SIGNAUX} (\f{signaux.py}) & --- & règles de franchissement ; réentraîner \\
+\f{demi\_vie}      & \f{reglages} & 2 & vitesse de décroissance de la fraîcheur \\
+\f{max\_jours}     & \f{reglages} & 10 & fraîcheur remise à 0 après ce délai \\
+\f{garder\_niveaux} & \f{reglages} & \f{False} & ajoute les niveaux bruts des indicateurs \\
+\f{variables\_prix} & \f{reglages} & \f{True} & rendements, volatilité, volume relatif \\
+\midrule
+\multicolumn{4}{@{}l}{\emph{Score macroéconomique}}\\
+\f{regime\_col}    & \f{reglages} & \f{"score\_niveau"} & score utilisé comme contexte \\
+\f{seuils\_regime} & \f{reglages} & (25, 75) & indicatrices de régime bas / élevé \\
+\f{score\_min}, \f{score\_max} & \f{reglages} & désactivé & pas d'apprentissage ni d'achat hors domaine \\
+\f{filtre\_sur}    & \f{reglages} & toutes périodes & périodes concernées par le filtre \\
+\f{publication\_lag\_days} & \f{load\_macro(...)} & 30 & délai avant utilisation du score \\
+\midrule
+\multicolumn{4}{@{}l}{\emph{Réseau et entraînement (\f{TrainConfig})}}\\
+\f{d\_model}       & \f{TrainConfig} & 16 & taille des représentations internes \\
+\f{n\_layers}      & \f{TrainConfig} & 1 & couches de LSTM \\
+\f{dropout}        & \f{TrainConfig} & 0,2 & régularisation \\
+\f{lr}, \f{weight\_decay} & \f{TrainConfig} & 1e-3, 1e-5 & pas d'apprentissage, pénalité L2 \\
+\f{patience}, \f{max\_epochs} & \f{TrainConfig} & 8, 100 & arrêt anticipé \\
+\f{batch\_size}    & \f{make\_loaders} & 256 & fenêtres par ajustement \\
+\midrule
+\multicolumn{4}{@{}l}{\emph{Seuils}}\\
+\f{grille\_achat}, \f{grille\_sortie} & \f{choisir\_seuils\_portefeuille} & quantiles & seuils candidats \\
+\f{min\_trades}    & \f{choisir\_seuils\_portefeuille} & 10 & trades minimum pour qu'un couple compte \\
+\midrule
+\multicolumn{4}{@{}l}{\emph{Stratégie (fonction \f{options} du script)}}\\
+\f{max\_positions} & \f{options} & $\min(10, 2n)$ & lignes simultanées ; taille $=1/$\f{max\_positions} \\
+\f{max\_par\_titre} & \f{options} & 2 & lignes par titre \\
+\f{ecart\_min}     & \f{options} & 3 & séances entre deux achats d'un même titre \\
+\f{recroisement}   & \f{options} & \f{False} & 2\textsuperscript{e} ligne seulement après un repli sous le seuil \\
+\f{max\_entrees\_jour} & \f{options} & 2 & achats par jour \\
+\f{stop\_atr}      & \f{options} & 2 & stop en ATR ; \f{None} = désactivé \\
+\f{duree\_max}     & \f{options} & \f{None} & sortie au temps ; \f{None} = désactivée \\
+\f{couts\_bps}     & \f{options} & 5 & frais par transaction \\
+\f{entree}         & \f{options} & \f{"cloture"} & exécution au cours du calcul ou à l'ouverture suivante \\
+\f{taille}         & \f{options} (à ajouter) & \f{"courant"} & base de calcul de la taille des lignes \\
+\midrule
+\multicolumn{4}{@{}l}{\emph{Usage quotidien}}\\
+\f{ENTRAINER}      & en-tête du script & \f{True} & \f{False} : décisions du jour seulement \\
+\f{cours\_now}     & en-tête du script & --- & cours du moment par titre \\
+\f{mon\_portefeuille} & en-tête du script & --- & lignes détenues (date, prix) \\
+\bottomrule
+\end{longtable}
+\normalsize
+
+\end{document}
