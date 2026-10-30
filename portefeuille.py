@@ -1,498 +1,460 @@
 """
-portefeuille.py — moteur cross-sectionnel : classement, allocation, backtest.
+Stratégie « portefeuille » : places limitées, entrée et sortie sur signal.
 
-RÔLE : machine de production. Ne regarde QUE le passé. Tourne tous les jours.
+Un seul modèle (probabilité de hausse), deux seuils :
+  - ENTRÉE  si P(hausse) >= seuil_achat
+  - SORTIE  si P(hausse) <= seuil_sortie (par défaut 0,50 : le modèle ne pense plus
+            que le titre va monter). seuil_sortie=None = pas de sortie sur signal.
 
-CHAÎNE
-    prix (dict ticker -> OHLCV)
-      -> panels de features           (dates x tickers)
-      -> winsorisation                (écrête les aberrants, à chaque date)
-      -> neutralisation secteur       (retire l'effet sectoriel)
-      -> rang percentile CENTRÉ       (-0.5 à +0.5, à chaque date, sur l'univers)
-      -> score composite              (moyenne pondérée, normalisée par somme des |w|)
-      -> filtre d'éligibilité         (régime, liquidité)
-      -> sélection + allocation       (pondération inverse-volatilité)
+Règles de gestion (fixées à l'avance, à ne pas optimiser) :
+  - départ 100 % en liquidités ;
+  - au plus `max_positions` lignes en même temps (10) ;
+  - au plus `max_par_titre` lignes par titre (2), la 2e au moins `ecart_min` (3) séances
+    après la 1re ;
+  - au plus `max_entrees_jour` achats par jour (2), en priorité les plus fortes probabilités ;
+  - sortie au PREMIER de ces événements :
+        signal de sortie (après au moins `duree_min` séances) : vend toutes les lignes du titre,
+        stop à `stop_atr` x ATR sous le prix d'achat de la ligne (désactivé si None),
+        durée maximale `duree_max` (désactivée par défaut : None) ;
+  - taille de chaque ligne : 1 / max_positions de la valeur du portefeuille
+    (taille="courant", gains réinvestis) ou du capital de départ (taille="initial").
 
-ORDRE À CHAQUE RÉÉQUILIBRAGE : SORTIES d'abord, ENTRÉES ensuite, pour que la
-liquidité libérée soit réinvestissable le jour même.
+Exécution (comme dans decision.py) :
+  entree="cloture"   : décision et exécution au même cours (dernier cours disponible,
+                       ex. cours de 16h avec figer_seance) ; dans le backtest, la clôture
+  entree="ouverture" : décision le soir, exécution à l'ouverture suivante
 
-CONVENTION : signal évalué sur la clôture de J, exécution à l'OUVERTURE de J+1.
-
-LONG ONLY. La vente à découvert n'est pas implémentée — c'était une incohérence de
-la version précédente (book() générait des SHORT que backtest() ignorait). Mieux vaut
-une absence explicite qu'un mensonge silencieux.
+Contenu :
+  backtest_portefeuille(...)          simulation jour par jour
+  choisir_seuils_portefeuille(...)    seuils choisis sur la VALIDATION
+  rapport_portefeuille(...)           Excel + graphiques
+  decisions_portefeuille_du_jour(...) quoi vendre, quoi garder, quoi acheter aujourd'hui
 """
 
-from dataclasses import dataclass, field
+from __future__ import annotations
+
+import os
+
 import numpy as np
 import pandas as pd
 
-
-# ============================================================================
-# Paramètres
-# ============================================================================
-
-@dataclass
-class ParamsPF:
-    # --- score composite : feature -> poids (peut être négatif) ---
-    poids: dict = field(default_factory=lambda: {
-        "mom_12_1": 1.00, "rev_5": 0.40, "ext_ema50": 0.25,
-    })
-    winsor: tuple = (0.02, 0.98)
-    neutraliser_secteur: bool = True
-    min_titres: int = 15          # sous ce seuil, pas de classement à cette date
-
-    # --- sélection (long only) ---
-    n_long: int = 10
-    rang_entree: float = 0.85     # percentile mini pour ouvrir
-    rang_sortie: float = 0.50     # hystérésis : on ferme sous ce seuil seulement
-
-    # --- éligibilité ---
-    er_rank_min: float = 0.45
-    adx_min: float = 15.0
-    dollar_vol_min: float = 5e6
-    prix_min: float = 5.0
-
-    # --- allocation ---
-    exposition: float = 0.95      # fraction du capital investie
-    poids_max: float = 0.20       # plafond par ligne
-    poids_min: float = 0.02       # sous ce poids, on n'ouvre pas
-    ponderation: str = "inv_vol"  # "inv_vol" | "equal" | "score"
-
-    # --- risque et sorties ---
-    atr_n: int = 14
-    stop_atr: float = 2.5         # stop initial
-    trail_atr: float = 5.0        # chandelier. 3.5 donnait 58 % de sorties sur stop :
-                                  # trop serré, la position n'a pas la place de respirer.
-    max_hold: int = 250
-    sortie_regime: float = 0.20   # ER rank sous ce seuil -> sortie
-
-    # --- exécution ---
-    freq_rebal: int = 5           # rééquilibrage tous les N jours ouvrés
-    cost_bps: float = 10.0        # aller simple
+from decision import JOURS_AN, _reference, _stats_serie, atr_wilder, ohlc
 
 
-# ============================================================================
-# Construction des panels
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Simulation
+# ---------------------------------------------------------------------------
+def backtest_portefeuille(pred: pd.DataFrame, prices, seuil_achat: float,
+                          seuil_sortie: float | None = 0.5, max_positions: int = 10,
+                          max_entrees_jour: int = 2, max_par_titre: int = 2,
+                          ecart_min: int = 3, recroisement: bool = False,
+                          duree_max: int | None = None, duree_min: int = 1,
+                          couts_bps: float = 10.0, entree: str = "cloture",
+                          stop_atr: float | None = None, atr: pd.DataFrame | None = None,
+                          stop_sur: str = "low", taille: str = "courant", capital: float = 1.0,
+                          **autres_options) -> dict:
+    """Rejoue la stratégie jour par jour sur la période couverte par `pred` (sortie de predict()).
 
-def construire_panels(prix: dict, Indicateurs, p: ParamsPF, generateur=None,
-                      min_cotation: float = 0.60, ffill_limite: int = 3) -> dict:
-    """prix : {ticker: DataFrame OHLCV}. Renvoie un dict de panels (dates x tickers).
+    Sorties : signal (P <= seuil_sortie) et/ou stop. duree_max=None (défaut) = pas de
+    sortie au temps. Un signal de sortie vend TOUTES les lignes du titre ; le stop est
+    propre à chaque ligne (calculé sur son prix et son ATR d'entrée).
 
-    generateur : fonction ind -> dict[str, Series].
-                 None => jeu minimal. Passer `features_orientees` (features.py) pour
-                 le catalogue complet — OBLIGATOIRE si les poids viennent de l'IC.
-    min_cotation : part minimale de titres cotant pour qu'une date soit retenue
-                 comme séance. 0.60 écarte les jours fériés partiels issus de
-                 l'union des calendriers. Mettre 0 pour désactiver.
-    ffill_limite : nombre de séances pendant lesquelles on reporte le dernier
-                 prix connu d'un titre suspendu. 0 pour désactiver.
+    Plusieurs lignes par titre : au plus `max_par_titre` (2), une nouvelle ligne au moins
+    `ecart_min` séances après la précédente sur ce titre. recroisement=True : la nouvelle
+    ligne exige en plus que la proba soit repassée sous seuil_achat entre-temps (un
+    « nouveau » signal, et pas le même qui dure).
+
+    Positions encore ouvertes à la fin du backtest : valorisées au dernier cours, sans
+    frais de vente, et listées dans les trades avec le motif « encore ouverte ».
     """
-    feats, aux = {}, {}
+    if seuil_sortie is None and stop_atr is None and duree_max is None:
+        raise ValueError("Aucune règle de sortie : donnez seuil_sortie, stop_atr ou duree_max.")
+    o = ohlc(prices)
+    proba = pred["proba"].unstack("ticker").sort_index()
+    cl = o["Close"]
+    dates = cl.index[(cl.index >= proba.index.min()) & (cl.index <= proba.index.max())]
+    cols = list(proba.columns)
+    T = len(dates)
+    get = lambda c: o[c].reindex(index=dates, columns=cols).to_numpy() if c in o else None
+    Craw, O, L, Hh = get("Close"), get("Open"), get("Low"), get("High")
+    C = pd.DataFrame(Craw).ffill().to_numpy()               # valorisation : dernier cours connu
+    P = proba.reindex(index=dates, columns=cols).to_numpy()
+    if entree == "ouverture" and O is None:
+        raise ValueError("entree='ouverture' demande la colonne Open dans prices.")
+    if stop_atr is not None:
+        if atr is None:
+            atr = atr_wilder(o)
+        A = atr.reindex(index=dates, columns=cols).to_numpy()
+        if stop_sur == "low" and L is None:
+            raise ValueError("stop_sur='low' demande la colonne Low dans prices.")
+    c = couts_bps / 1e4
 
-    for t, df in prix.items():
-        ind = Indicateurs(df, burnin=False)
+    cash = capital
+    pos: dict[int, list[dict]] = {}      # colonne -> lignes ouvertes [{qty, i_entree, px, stop...}]
+    sous_seuil: dict[int, bool] = {}     # proba repassée sous seuil_achat depuis la dernière entrée
+    attente: list[tuple] = []            # ordres à exécuter à l'ouverture suivante
+    equity, frais_j = np.zeros(T), np.zeros(T)
+    n_pos, expo = np.zeros(T), np.zeros(T)
+    trades = []
+    n_lignes = lambda: sum(len(v) for v in pos.values())
 
-        if generateur is not None:
-            feats[t] = pd.DataFrame(generateur(ind))
+    def vendre(j: int, ligne: dict, px: float, i: int, motif: str, frais: bool = True) -> None:
+        nonlocal cash
+        pos[j].remove(ligne)
+        if not pos[j]:
+            del pos[j]
+        brut = ligne["qty"] * px
+        cc = c if frais else 0.0
+        cash += brut * (1 - cc)
+        frais_j[i] += brut * cc
+        trades.append({"ticker": cols[j], "ligne": ligne["n"], "date d'entrée": dates[ligne["i_entree"]],
+                       "prix d'entrée": ligne["px"], "date de sortie": dates[i], "prix de sortie": px,
+                       "motif de sortie": motif, "séances détenues": i - ligne["i_entree"],
+                       "proba à l'entrée": ligne["proba"], "stop": ligne["stop"],
+                       "gain": px / ligne["px"] - 1,
+                       "résultat (€ pour 1 € de capital)": brut * (1 - cc) - ligne["montant"]})
+
+    def acheter(j: int, px: float, i: int, montant: float, i_decision: int) -> None:
+        nonlocal cash
+        if len(pos.get(j, [])) >= max_par_titre:
+            return
+        montant = min(montant, cash / (1 + c))
+        if montant <= 1e-12 or not np.isfinite(px) or px <= 0:
+            return
+        cash -= montant * (1 + c)
+        frais_j[i] += montant * c
+        stop = px - stop_atr * A[i_decision, j] if stop_atr is not None else np.nan
+        pos.setdefault(j, []).append({"qty": montant / px, "i_entree": i, "px": px, "stop": stop,
+                                      "montant": montant * (1 + c), "proba": P[i_decision, j],
+                                      "n": len(pos.get(j, [])) + 1})
+        sous_seuil[j] = False
+
+    def peut_ajouter(j: int, i: int) -> bool:
+        lignes = pos.get(j, [])
+        if len(lignes) >= max_par_titre:
+            return False
+        if not lignes:
+            return True
+        derniere = max(l["i_entree"] for l in lignes)
+        ecart = i - derniere + (1 if entree == "ouverture" else 0)
+        return ecart >= ecart_min and (not recroisement or sous_seuil.get(j, False))
+
+    for i in range(T):
+        # 1. Ordres décidés la veille, exécutés à l'ouverture (ventes d'abord)
+        if attente:
+            for typ, j, info in sorted(attente, key=lambda x: x[0] != "vente"):
+                px = O[i, j] if np.isfinite(O[i, j]) else C[i, j]
+                if typ == "vente":
+                    ligne, motif = info
+                    if j in pos and ligne in pos[j]:
+                        vendre(j, ligne, px, i, motif)
+                else:
+                    acheter(j, px, i, info["montant"], info["i"])
+            attente = []
+
+        # 2. Stops pendant la séance (ligne par ligne)
+        if stop_atr is not None:
+            for j in list(pos):
+                for ligne in list(pos.get(j, [])):
+                    if ligne["i_entree"] == i and entree == "cloture":
+                        continue                               # achetée ce soir : pas encore exposée
+                    bas = L[i, j] if stop_sur == "low" else Craw[i, j]
+                    if np.isfinite(bas) and np.isfinite(ligne["stop"]) and bas <= ligne["stop"]:
+                        ouv = O[i, j] if (O is not None and ligne["i_entree"] != i) else np.nan
+                        px = ouv if (np.isfinite(ouv) and ouv < ligne["stop"]) else \
+                            (ligne["stop"] if stop_sur == "low" else Craw[i, j])
+                        vendre(j, ligne, px, i, "stop")
+
+        # 3. Décisions au dernier cours de la séance
+        for j in range(len(cols)):
+            if np.isfinite(P[i, j]) and P[i, j] < seuil_achat:
+                sous_seuil[j] = True
+        sorties = []                                           # (j, ligne, motif)
+        for j, lignes in pos.items():
+            pj = P[i, j]
+            signal = seuil_sortie is not None and np.isfinite(pj) and pj <= seuil_sortie
+            for ligne in lignes:
+                k = i - ligne["i_entree"] + (1 if entree == "ouverture" else 0)   # séances détenues
+                if duree_max is not None and k >= duree_max:
+                    sorties.append((j, ligne, "durée maximale"))
+                elif signal and k >= duree_min:
+                    sorties.append((j, ligne, "signal de sortie"))
+        valeur = cash + sum(l["qty"] * C[i, j] for j, ls in pos.items() for l in ls)
+        vendus = {j for j, _, _ in sorties}
+        if entree == "cloture":
+            for j, ligne, motif in sorties:
+                vendre(j, ligne, Craw[i, j] if np.isfinite(Craw[i, j]) else C[i, j], i, motif)
         else:
-            lr = ind.logret(ind.price, 1)
-            feats[t] = pd.DataFrame({
-                "mom_12_1":  lr.rolling(252).sum() - lr.rolling(21).sum(),
-                "rev_5":    -lr.rolling(5).sum(),
-                "ext_ema50": ind.ext(50, p.atr_n),
-            })
+            attente += [("vente", j, (ligne, motif)) for j, ligne, motif in sorties]
 
-        # colonnes techniques : toujours nécessaires (exécution, stops, éligibilité)
-        aux[t] = pd.DataFrame({
-            "close": ind.close,
-            "open":  df["Open"].astype(float) if "Open" in df.columns else ind.close,
-            "high":  ind.high,
-            "low":   ind.low,
-            "atr":   ind.atr(p.atr_n),
-            "er_rk": ind.rank_pct(ind.er(10), 252),
-            "adx":   ind.adx(p.atr_n),
-            "dvol": (ind.close * ind.volume).rolling(20).median(),
+        places = max_positions - (n_lignes() - (len(sorties) if entree == "ouverture" else 0))
+        n_achats = min(max_entrees_jour, max(places, 0))
+        if n_achats > 0 and i < T - (1 if entree == "ouverture" else 0):
+            cand = [(P[i, j], j) for j in range(len(cols))
+                    if j not in vendus and np.isfinite(P[i, j]) and P[i, j] >= seuil_achat
+                    and np.isfinite(Craw[i, j]) and peut_ajouter(j, i)]
+            cand.sort(reverse=True)
+            montant = (valeur if taille == "courant" else capital) / max_positions
+            for _, j in cand[:n_achats]:
+                if entree == "cloture":
+                    acheter(j, Craw[i, j], i, montant, i)
+                else:
+                    attente.append(("achat", j, {"montant": montant, "i": i}))
+
+        # 4. Valeur du portefeuille à la clôture
+        investi = sum(l["qty"] * C[i, j] for j, ls in pos.items() for l in ls)
+        equity[i] = cash + investi
+        n_pos[i] = n_lignes()
+        expo[i] = investi / equity[i] if equity[i] > 0 else 0.0
+
+    # Positions encore ouvertes à la fin : valorisées au dernier cours, sans frais
+    for j in list(pos):
+        for ligne in list(pos[j]):
+            vendre(j, ligne, C[T - 1, j], T - 1, "encore ouverte", frais=False)
+    equity[T - 1] = cash
+
+    eq = pd.Series(equity, index=dates)
+    net = eq.pct_change().fillna(eq.iloc[0] / capital - 1)
+    prec = eq.shift(1).fillna(capital)
+    frais = pd.Series(frais_j, index=dates) / prec
+    rets = cl.pct_change(fill_method=None).reindex(index=dates, columns=cols)
+    reference = _reference(rets, proba.reindex(index=dates, columns=cols).notna(), couts_bps)
+
+    res = {"net": net, "brut": net + frais, "frais": frais, "reference": reference,
+           "valeur": eq, "positions": pd.Series(n_pos, index=dates),
+           "exposition": pd.Series(expo, index=dates),
+           "trades": pd.DataFrame(trades)}
+    res["stats"] = stats_portefeuille(res, max_positions)
+    return res
+
+
+def stats_portefeuille(res: dict, max_positions: int) -> pd.DataFrame:
+    s = pd.DataFrame({"stratégie (net de frais)": _stats_serie(res["net"]),
+                      "stratégie (avant frais)": _stats_serie(res["brut"]),
+                      "référence équipondérée": _stats_serie(res["reference"])})
+    t = res["trades"]
+    extra = {"nombre de trades": len(t),
+             "trades par an": len(t) / (len(res["net"]) / JOURS_AN)}
+    if len(t):
+        extra.update({
+            "trades gagnants": (t["gain"] > 0).mean(),
+            "gain moyen par trade": t["gain"].mean(),
+            "gain moyen des trades gagnants": t.loc[t["gain"] > 0, "gain"].mean(),
+            "perte moyenne des trades perdants": t.loc[t["gain"] <= 0, "gain"].mean(),
+            "durée moyenne de détention (séances)": t["séances détenues"].mean(),
         })
-
-    def panel(src, col):
-        return pd.DataFrame({t: d[col] for t, d in src.items()}).sort_index()
-
-    out = {c: panel(feats, c) for c in next(iter(feats.values())).columns}
-    out |= {c: panel(aux, c) for c in next(iter(aux.values())).columns}
-
-    # ------------------------------------------------------------------
-    # Nettoyage du calendrier.
-    #
-    # L'assemblage par `pd.DataFrame({ticker: serie})` produit l'UNION des dates
-    # de tous les titres. Un jour férié sur une place mais ouvré ailleurs crée
-    # donc une ligne où la quasi-totalité des titres est NaN. Sans traitement,
-    # ces titres disparaissent de la valorisation du portefeuille le temps d'une
-    # barre : l'equity chute à zéro puis revient. Deux parades cumulées.
-    #
-    # (a) on supprime les dates où trop peu de titres cotent : ce ne sont pas
-    #     des séances exploitables, aucune décision ne peut y être prise ;
-    # (b) sur les trous résiduels (suspension d'un titre isolé), on reporte le
-    #     dernier prix connu, avec une limite : au-delà, la donnée est trop
-    #     ancienne pour valoriser honnêtement.
-    # ------------------------------------------------------------------
-    cl = out["close"]
-    part = cl.notna().sum(axis=1) / max(cl.shape[1], 1)
-    seances = part >= min_cotation
-    if not seances.all():
-        out = {k: v.loc[seances] for k, v in out.items()}
-
-    if ffill_limite:
-        for c in ("open", "high", "low", "close"):
-            out[c] = out[c].ffill(limit=ffill_limite)
-
-    return out
+        for motif, part in t["motif de sortie"].value_counts(normalize=True).items():
+            extra[f"sorties : {motif}"] = part
+    extra.update({
+        "positions détenues en moyenne": res["positions"].mean(),
+        f"jours avec les {max_positions} places prises": (res["positions"] >= max_positions).mean(),
+        "exposition moyenne (part investie)": res["exposition"].mean(),
+        "frais totaux (en % du capital)": res["frais"].sum(),
+    })
+    for k, v in extra.items():
+        s.loc[k, "stratégie (net de frais)"] = v
+    return s
 
 
-# ============================================================================
-# Transformations cross-sectionnelles
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Choix des seuils sur la validation
+# ---------------------------------------------------------------------------
+def choisir_seuils_portefeuille(pred_val: pd.DataFrame, prices, grille_achat=None,
+                                grille_sortie=None, min_trades: int = 30,
+                                **options) -> pd.DataFrame:
+    """Teste les couples (seuil d'achat, seuil de sortie) sur la VALIDATION.
 
-def winsorize_cs(df, lo=0.02, hi=0.98):
-    """Écrête les extrêmes ligne par ligne (à chaque date, sur l'univers).
-    À faire AVANT la neutralisation : sinon un outlier pollue la moyenne sectorielle."""
-    return df.clip(lower=df.quantile(lo, axis=1), upper=df.quantile(hi, axis=1), axis=0)
-
-
-def neutralize_cs(df, secteurs: pd.Series, min_grp=3):
-    """Retranche la moyenne du secteur : évite de parier sur un secteur sans le vouloir."""
-    if secteurs is None:
-        return df
-    g = secteurs.reindex(df.columns)
-    out = df.copy()
-    for _, cols in g.groupby(g).groups.items():
-        cols = [c for c in cols if c in df.columns]
-        if len(cols) >= min_grp:
-            out[cols] = df[cols].sub(df[cols].mean(axis=1), axis=0)
-    return out
-
-
-def rank_cs(df, min_titres=15):
-    """Rang percentile 0-1 à chaque date. axis=1 : à travers les titres, pas le temps."""
-    valide = df.notna().sum(axis=1) >= min_titres
-    return df.rank(axis=1, pct=True).where(valide, np.nan)
-
-
-# ============================================================================
-# Moteur
-# ============================================================================
-
-class Portefeuille:
-
-    def __init__(self, panels: dict, p: ParamsPF | None = None, secteurs=None):
-        self.pn = panels
-        self.p = p or ParamsPF()
-        self.secteurs = secteurs
-        self._score()
-
-    # ---------- score composite et éligibilité ----------
-
-    def _score(self):
-        p = self.p
-
-        # validation : échouer bruyamment plutôt que silencieusement
-        demandees = {k for k, v in p.poids.items() if v != 0}
-        manquantes = demandees - set(self.pn)
-        if manquantes:
-            raise KeyError(
-                f"Features absentes des panels : {sorted(manquantes)}.\n"
-                f"Disponibles : {sorted(self.pn)}.\n"
-                f"-> construire_panels(..., generateur=features_orientees)"
-            )
-        if not demandees:
-            raise ValueError("Aucune feature avec un poids non nul dans ParamsPF.poids")
-
-        # Rangs CENTRÉS (-0.5 à +0.5) et normalisation par la somme des VALEURS
-        # ABSOLUES : les poids issus de poids_depuis_ic peuvent être négatifs. Diviser
-        # par la somme signée ferait exploser le score quand les poids se compensent
-        # (ex. {0.5, -0.45} -> diviseur 0.05 -> score x20).
-        acc, total = None, 0.0
-        for nom, w in p.poids.items():
-            if w == 0:
-                continue
-            x = winsorize_cs(self.pn[nom], *p.winsor)
-            if p.neutraliser_secteur:
-                x = neutralize_cs(x, self.secteurs)
-            r = rank_cs(x, p.min_titres) - 0.5
-            acc = r * w if acc is None else acc + r * w
-            total += abs(w)
-
-        self.score = acc / total                       # borné [-0.5, +0.5]
-        self.rang = rank_cs(self.score, p.min_titres)
-
-        self.eligible = (
-            (self.pn["er_rk"] > p.er_rank_min)
-            & (self.pn["adx"] > p.adx_min)
-            & (self.pn["dvol"] > p.dollar_vol_min)
-            & (self.pn["close"] > p.prix_min)
-            & self.rang.notna()
-            & self.pn["atr"].gt(0)
-        ).fillna(False)
-
-    # ---------- allocation ----------
-
-    def _poids_cibles(self, tickers, date) -> pd.Series:
-        """Pondération des lignes retenues.
-
-        inv_vol => risque en euros IDENTIQUE par ligne :
-            risque_i = capital_i x stop_atr x atr_pct_i
-                     ∝ (1/atr_pct_i) x atr_pct_i = constante
-        C'est ce qui réconcilie "allouer par poids" et "dimensionner par le risque".
-        """
-        p = self.p
-        if not len(tickers):
-            return pd.Series(dtype=float)
-
-        if p.ponderation == "inv_vol":
-            atrp = (self.pn["atr"].loc[date, tickers] /
-                    self.pn["close"].loc[date, tickers]).replace(0, np.nan)
-            raw = 1.0 / atrp
-        elif p.ponderation == "score":
-            raw = (self.score.loc[date, tickers] + 0.5).clip(lower=0.01)
-        else:
-            raw = pd.Series(1.0, index=tickers)
-
-        raw = raw.replace([np.inf, -np.inf], np.nan).dropna()
-        if raw.empty:
-            return pd.Series(dtype=float)
-
-        w = raw / raw.sum() * p.exposition
-
-        # plafonnement itératif : l'excédent est redistribué sur les non plafonnées.
-        # Si toutes sont plafonnées, l'exposition reste < p.exposition : c'est voulu
-        # (moins de candidats que n_long => on n'investit pas tout, on ne concentre pas).
-        for _ in range(10):
-            trop = w > p.poids_max
-            if not trop.any():
-                break
-            exc = (w[trop] - p.poids_max).sum()
-            w[trop] = p.poids_max
-            libre = ~trop
-            if not libre.any() or w[libre].sum() <= 0:
-                break
-            w[libre] += exc * w[libre] / w[libre].sum()
-
-        return w[w >= p.poids_min]
-
-    # ---------- carnet du jour (usage live) ----------
-
-    def book(self, date=None, equity: float = 10_000.0) -> pd.DataFrame:
-        """Classement + allocation à une date. C'est l'ordre à passer. LONG ONLY."""
-        p = self.p
-        date = self.rang.index[-1] if date is None else pd.Timestamp(date)
-
-        rg, el = self.rang.loc[date], self.eligible.loc[date]
-        px, atr = self.pn["close"].loc[date], self.pn["atr"].loc[date]
-
-        sel = rg[(rg >= p.rang_entree) & el].nlargest(p.n_long).index
-        w = self._poids_cibles(list(sel), date)
-
-        lignes = []
-        for t, wi in w.items():
-            capital = wi * equity
-            qty = capital / px[t]
-            dist = p.stop_atr * atr[t]
-            lignes.append({
-                "ticker": t, "sens": "LONG",
-                "rang": round(rg[t], 3), "score": round(self.score.loc[date, t], 3),
-                "prix": round(px[t], 2), "poids_%": round(wi * 100, 2),
-                "capital": round(capital, 2), "qty": round(qty, 4),
-                "stop": round(px[t] - dist, 2),
-                "risque_€": round(qty * dist, 2),
-                "risque_%": round(qty * dist / equity * 100, 2),
-                "atr_%": round(atr[t] / px[t] * 100, 2),
-            })
-
-        cols = ["ticker", "sens", "rang", "score", "prix", "poids_%", "capital",
-                "qty", "stop", "risque_€", "risque_%", "atr_%"]
-        return (pd.DataFrame(lignes, columns=cols)
-                .sort_values("rang", ascending=False).reset_index(drop=True))
-
-    # ---------- backtest ----------
-
-    def backtest(self, capital: float = 10_000.0) -> dict:
-        p = self.p
-        idx = self.rang.index
-        cost = p.cost_bps / 10_000.0
-
-        op, hi, lo, cl = (self.pn["open"], self.pn["high"],
-                          self.pn["low"], self.pn["close"])
-        atr = self.pn["atr"]
-
-        cash = capital
-        pos = {}                       # ticker -> dict d'état
-        trades, courbe, expo = [], np.full(len(idx), np.nan), np.zeros(len(idx))
-        ordres = {"sorties": [], "entrees": {}}
-
-        for i, d in enumerate(idx):
-            if i == 0:
-                courbe[i] = cash
-                continue
-            dv = idx[i - 1]
-
-            # ---- 1. exécution des ordres décidés hier, à l'ouverture ----
-            for t in ordres["sorties"]:
-                if t in pos and not np.isnan(op.loc[d, t]):
-                    px = op.loc[d, t]
-                    cash += pos[t]["qty"] * px * (1 - cost)
-                    trades.append(_trade(t, pos.pop(t), d, px, "signal", cost))
-
-            # servir dans l'ordre du score : pas de biais alphabétique si le cash manque
-            for t, cap in sorted(ordres["entrees"].items(),
-                                 key=lambda kv: -kv[1]):
-                px, a = op.loc[d, t], atr.loc[dv, t]
-                if t in pos or np.isnan(px) or np.isnan(a) or a <= 0:
-                    continue
-                cap = min(cap, cash / (1 + cost))
-                qty = cap / px
-                if qty * px < 1:
-                    continue
-                cash -= qty * px * (1 + cost)
-                pos[t] = {"qty": qty, "px_in": px, "date_in": d,
-                          "stop": px - p.stop_atr * a, "plus_haut": px, "held": 0}
-            ordres = {"sorties": [], "entrees": {}}
-
-            # ---- 2. stops touchés en séance (avant toute autre décision) ----
-            for t in list(pos):
-                s = pos[t]
-                s["held"] += 1
-                low, high = lo.loc[d, t], hi.loc[d, t]
-                if np.isnan(low):
-                    continue
-                if low <= s["stop"]:
-                    px = min(op.loc[d, t], s["stop"])   # gap : on subit l'ouverture
-                    cash += s["qty"] * px * (1 - cost)
-                    trades.append(_trade(t, pos.pop(t), d, px, "stop", cost))
-                    continue
-                # chandelier : trailing depuis le plus haut atteint, jamais en arrière
-                s["plus_haut"] = max(s["plus_haut"], high)
-                a = atr.loc[d, t]
-                if not np.isnan(a):
-                    s["stop"] = max(s["stop"], s["plus_haut"] - p.trail_atr * a)
-
-            # ---- 3. rééquilibrage : SORTIES d'abord, ENTRÉES ensuite ----
-            if i % p.freq_rebal == 0:
-                rg, el = self.rang.loc[d], self.eligible.loc[d]
-                er = self.pn["er_rk"].loc[d]
-
-                # 3a. sorties par signal -> libèrent de la liquidité pour 3b
-                for t, s in pos.items():
-                    if (pd.isna(rg.get(t)) or rg.get(t, 0) < p.rang_sortie
-                            or er.get(t, 1) < p.sortie_regime
-                            or s["held"] >= p.max_hold):
-                        ordres["sorties"].append(t)
-
-                # 3b. entrées, en tenant compte du cash libéré par 3a
-                restants = [t for t in pos if t not in ordres["sorties"]]
-                libere = sum(pos[t]["qty"] * cl.loc[d, t] for t in ordres["sorties"]
-                             if not np.isnan(cl.loc[d, t]))
-                equity = cash + sum(pos[t]["qty"] * cl.loc[d, t] for t in pos
-                                    if not np.isnan(cl.loc[d, t]))
-                dispo = cash + libere
-                n_libres = p.n_long - len(restants)
-
-                if n_libres > 0 and dispo > equity * p.poids_min:
-                    cand = (rg[(rg >= p.rang_entree) & el]
-                            .drop(labels=restants, errors="ignore")
-                            .nlargest(n_libres).index)
-                    if len(cand):
-                        w = self._poids_cibles(list(cand), d)
-                        besoin = (w * equity).sum()
-                        k = min(1.0, dispo / besoin) if besoin > 0 else 0.0
-                        for t, wi in w.items():
-                            ordres["entrees"][t] = wi * equity * k
-
-            val_pos = sum(pos[t]["qty"] * cl.loc[d, t] for t in pos
-                          if not np.isnan(cl.loc[d, t]))
-            courbe[i] = cash + val_pos
-            expo[i] = val_pos / courbe[i] if courbe[i] > 0 else 0.0
-
-        eq = pd.Series(courbe, index=idx).ffill().fillna(capital)
-
-        # positions encore ouvertes a la derniere date, valorisees au dernier cours
-        d_fin = idx[-1]
-        ouvertes = []
-        for t, s in pos.items():
-            px = cl.loc[d_fin, t]
-            if np.isnan(px):
-                continue
-            frais_in = s["qty"] * s["px_in"] * cost
-            ouvertes.append({
-                "ticker": t, "entree": s["date_in"], "px_entree": s["px_in"],
-                "px_actuel": px, "qty": s["qty"],
-                "valeur": s["qty"] * px, "stop": s["stop"],
-                "frais": frais_in,
-                "pnl_latent": (px - s["px_in"]) * s["qty"] - frais_in,
-                "ret_%": ((px - s["px_in"]) * s["qty"] - frais_in) / (s["px_in"] * s["qty"]) * 100,
-                "jours": s["held"],
-            })
-
-        return {"equity": eq, "trades": pd.DataFrame(trades),
-                "positions": pd.DataFrame(ouvertes),
-                "cash": cash, "exposition": pd.Series(expo, index=idx), "params": p}
-
-
-def _trade(t, s, d_out, px_out, motif, cost):
-    """PnL NET des coûts (aller + retour). La version précédente le calculait brut,
-    ce qui surestimait profit_factor et gain_moyen."""
-    frais = s["qty"] * (s["px_in"] + px_out) * cost
-    pnl = (px_out - s["px_in"]) * s["qty"] - frais
-    return {"ticker": t, "entree": s["date_in"], "sortie": d_out,
-            "px_entree": s["px_in"], "px_sortie": px_out, "qty": s["qty"],
-            "frais": frais, "pnl": pnl,
-            "ret_%": pnl / (s["px_in"] * s["qty"]) * 100,
-            "jours": s["held"], "motif": motif}
-
-
-# ============================================================================
-# Métriques
-# ============================================================================
-
-def stats(res: dict, close: pd.DataFrame | None = None, freq: int = 252) -> pd.Series:
-    """close : panel de clôtures. Si fourni, ajoute le benchmark buy & hold.
-
-    POURQUOI LE BENCHMARK EST INDISPENSABLE
-    Sur une marche aléatoire en log, le PRIX a une dérive positive (inégalité de
-    Jensen). Une stratégie long-only capture cette dérive SANS aucun edge. Comparer
-    à zéro ne prouve donc rien : le bon contrôle négatif est le buy & hold
-    équipondéré, ajusté de l'exposition moyenne.
+    Ajoute la variante « pas de sortie sur signal » (seuil_sortie=None, libellé
+    « aucun (stop seul) ») quand un stop ou une durée maximale existe.
+    Gardez une grille GROSSIÈRE : plus on teste de couples, plus le meilleur est flatteur.
+    grille_sortie : par défaut deux valeurs « naturelles » : 0,50, et la médiane des
+                    probabilités du modèle sur la validation (un seuil fixe à 0,50 peut ne
+                    jamais se déclencher si le modèle donne rarement moins de 0,50).
+    options : max_positions, max_entrees_jour, duree_max, couts_bps, entree, stop_atr, atr...
     """
-    eq, tr = res["equity"], res["trades"]
-    r = eq.pct_change().dropna()
-    ans = len(eq) / freq
-    cagr = (eq.iloc[-1] / eq.iloc[0]) ** (1 / ans) - 1 if ans > 0 else np.nan
-    vol = r.std() * np.sqrt(freq)
-    dd = (eq / eq.cummax() - 1).min()
+    if grille_achat is None:
+        q = pred_val["proba"].quantile([0.7, 0.8, 0.9, 0.95]).round(3)
+        grille_achat = sorted(set(q.tolist()))
+    if grille_sortie is None:
+        grille_sortie = sorted({0.5, round(float(pred_val["proba"].median()), 3)})
+    autre_sortie = options.get("stop_atr") is not None or options.get("duree_max") is not None
+    sorties = [s for s in grille_sortie if s is not None]
+    if autre_sortie:
+        sorties.append(None)          # variante « pas de sortie sur signal » (stop seul)
+    lignes = []
+    for sa in grille_achat:
+        for ss in sorties:
+            if ss is not None and ss >= sa:
+                continue
+            bt = backtest_portefeuille(pred_val, prices, sa, ss, **options)
+            st = bt["stats"]
+            col = st["stratégie (net de frais)"]
+            lignes.append({"seuil_achat": sa,
+                           "seuil_sortie": "aucun (stop seul)" if ss is None else ss,
+                           "Sharpe net": col["Sharpe (sans taux sans risque)"],
+                           "Sharpe référence": st.loc["Sharpe (sans taux sans risque)",
+                                                      "référence équipondérée"],
+                           "rendement annualisé net": col["rendement annualisé"],
+                           "perte maximale": col["perte maximale (max drawdown)"],
+                           "trades": int(col["nombre de trades"]),
+                           "trades gagnants": col.get("trades gagnants", np.nan),
+                           "durée moyenne": col.get("durée moyenne de détention (séances)", np.nan),
+                           "positions moyennes": col["positions détenues en moyenne"]})
+    tab = pd.DataFrame(lignes)
+    tab["évaluable"] = tab["trades"] >= min_trades
+    tab = tab.sort_values(["évaluable", "Sharpe net"], ascending=[False, False]).reset_index(drop=True)
+    best = tab.iloc[0]
+    if not best["évaluable"] or best["Sharpe net"] <= max(0.0, best["Sharpe référence"]):
+        print("ATTENTION : sur la validation, aucune combinaison ne fait mieux que la référence "
+              "(ou que zéro) après frais.")
+    return tab
 
-    out = {"perf_%": (eq.iloc[-1] / eq.iloc[0] - 1) * 100, "cagr_%": cagr * 100,
-           "vol_%": vol * 100, "sharpe": cagr / vol if vol > 0 else np.nan,
-           "max_dd_%": dd * 100, "calmar": cagr / abs(dd) if dd < 0 else np.nan,
-           "nb_trades": len(tr)}
 
-    if "exposition" in res:
-        out["expo_moy_%"] = res["exposition"].mean() * 100
+# ---------------------------------------------------------------------------
+# Rapport
+# ---------------------------------------------------------------------------
+def rapport_portefeuille(res: dict, out_dir: str = "backtest_portefeuille", titre: str = "") -> pd.DataFrame:
+    import matplotlib
+    try:
+        from IPython import get_ipython
+        if get_ipython() is None:
+            matplotlib.use("Agg")
+    except ImportError:
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
 
-    if len(tr):
-        g, pr = tr[tr.pnl > 0], tr[tr.pnl <= 0]
-        out |= {"win_%": len(g) / len(tr) * 100,
-                "gain_moy_%": g["ret_%"].mean() if len(g) else np.nan,
-                "perte_moy_%": pr["ret_%"].mean() if len(pr) else np.nan,
-                "profit_factor": g.pnl.sum() / abs(pr.pnl.sum()) if len(pr) and pr.pnl.sum() else np.inf,
-                "duree_moy_j": tr.jours.mean(),
-                "frais_tot": tr.frais.sum(),
-                "frais_%_an": tr.frais.sum() / eq.iloc[0] / ans * 100}
+    os.makedirs(out_dir, exist_ok=True)
+    eq = (1 + res["net"]).cumprod()
+    ref = (1 + res["reference"]).cumprod()
+    fig, (a1, a2, a3) = plt.subplots(3, 1, figsize=(11, 8), sharex=True,
+                                     gridspec_kw={"height_ratios": [3, 1.1, 1.1]})
+    a1.plot(eq.index, eq, color="tab:blue", label="stratégie (net de frais)")
+    a1.plot(ref.index, ref, color="grey", label="référence (acheter et conserver)")
+    a1.set_ylabel("valeur de 1 € investi")
+    a1.set_title(f"Portefeuille à places limitées {titre}".strip())
+    a1.legend()
+    dd = eq / eq.cummax() - 1
+    a2.fill_between(dd.index, dd.values, 0, color="tab:red", alpha=0.4)
+    a2.set_ylabel("perte depuis\nle plus haut")
+    a3.fill_between(res["positions"].index, res["positions"].values, step="post", alpha=0.5)
+    a3.set_ylabel("positions\ndétenues")
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, "courbe_portefeuille.png"), dpi=130)
+    plt.close(fig)
 
-    if close is not None:
-        bh = close.pct_change().mean(axis=1).reindex(eq.index).fillna(0).add(1).cumprod()
-        bh_cagr = bh.iloc[-1] ** (1 / ans) - 1 if ans > 0 else np.nan
-        expo = res.get("exposition", pd.Series(1.0, index=eq.index)).mean()
-        out |= {"bh_cagr_%": bh_cagr * 100,
-                "alpha_vs_bh_%": (cagr - bh_cagr * expo) * 100}
+    mensuel = pd.DataFrame({"stratégie nette": (1 + res["net"]).resample("ME").prod() - 1,
+                            "référence": (1 + res["reference"]).resample("ME").prod() - 1})
+    mensuel.index = mensuel.index.strftime("%Y-%m")
+    with pd.ExcelWriter(os.path.join(out_dir, "backtest_portefeuille.xlsx"), engine="openpyxl") as w:
+        res["stats"].to_excel(w, sheet_name="Statistiques")
+        mensuel.to_excel(w, sheet_name="Rendements mensuels")
+        res["trades"].to_excel(w, sheet_name="Trades", index=False)
+        if len(res["trades"]):
+            par_titre = res["trades"].groupby("ticker").agg(
+                trades=("gain", "size"), gagnants=("gain", lambda g: (g > 0).mean()),
+                gain_moyen=("gain", "mean"), duree_moyenne=("séances détenues", "mean"))
+            par_titre.to_excel(w, sheet_name="Par titre")
+    print(f"Backtest écrit dans : {os.path.abspath(out_dir)}")
+    return res["stats"]
 
-    return pd.Series(out)
+
+# ---------------------------------------------------------------------------
+# Décisions du jour
+# ---------------------------------------------------------------------------
+def _lignes_portefeuille(portefeuille: dict) -> list[tuple[str, dict]]:
+    """Accepte {"CAT": [{"date":..., "prix":...}, {...}]}, {"CAT": {"date":..., "prix":...}}
+    ou {"CAT": "2026-10-12"} ; renvoie [(titre, {"date", "prix"?}), ...]."""
+    out = []
+    for t, info in portefeuille.items():
+        infos = info if isinstance(info, (list, tuple)) else [info]
+        for x in infos:
+            out.append((t, x if isinstance(x, dict) else {"date": x}))
+    return out
+
+
+def decisions_portefeuille_du_jour(model, data, window: int, portefeuille: dict,
+                                   seuil_achat: float, seuil_sortie: float | None = 0.5,
+                                   max_positions: int = 10, max_entrees_jour: int = 2,
+                                   max_par_titre: int = 2, ecart_min: int = 3,
+                                   duree_max: int | None = None, duree_min: int = 1, prices=None,
+                                   stop_atr: float | None = None, atr: pd.DataFrame | None = None,
+                                   static=None, entree: str = "cloture", **autres_options) -> dict:
+    """Quoi vendre, quoi garder, quoi acheter aujourd'hui.
+
+    portefeuille : vos lignes actuelles. Un titre peut avoir 1 ou 2 lignes :
+                   {"CAT":   [{"date": "2026-10-12", "prix": 352.1},
+                              {"date": "2026-10-20", "prix": 360.4}],
+                    "MC.PA": {"date": "2026-10-15", "prix": 698.5}}
+                   ("prix" sert au stop ; facultatif si le stop est désactivé)
+                   ou simplement {"MC.PA": "2026-10-15"}
+    (recroisement n'est pas vérifiable ici : il faudrait l'historique des probas.)
+    """
+    from decision import decisions_du_jour
+
+    jour = decisions_du_jour(model, data, window=window, seuil_achat=seuil_achat, static=static,
+                             horizon=duree_max or 0, prices=prices, entree=entree)
+    jour = jour.drop(columns=["sortie prévue"], errors="ignore")
+    derniere = jour.attrs["date"]
+    seances = data.df.index.get_level_values("date").unique().sort_values()
+    if stop_atr is not None and atr is None and prices is not None:
+        atr = atr_wilder(ohlc(prices))
+
+    lignes = []
+    for t, info in _lignes_portefeuille(portefeuille):
+        d0 = pd.Timestamp(info["date"])
+        k = int(((seances > d0) & (seances <= derniere)).sum())   # séances détenues
+        p = jour.loc[t, "proba"] if t in jour.index else np.nan
+        cours = jour.loc[t, "dernier cours"] if (t in jour.index and "dernier cours" in jour) else np.nan
+        stop = np.nan
+        if stop_atr is not None and "prix" in info and atr is not None and t in atr.columns:
+            a = atr[t].loc[:d0].iloc[-1] if len(atr[t].loc[:d0]) else np.nan
+            stop = info["prix"] - stop_atr * a
+        if np.isfinite(stop) and np.isfinite(cours) and cours <= stop:
+            action, motif = "VENDRE", "stop"
+        elif duree_max is not None and k >= duree_max:
+            action, motif = "VENDRE", "durée maximale"
+        elif seuil_sortie is not None and k >= duree_min and np.isfinite(p) and p <= seuil_sortie:
+            action, motif = "VENDRE", "signal de sortie"
+        else:
+            action = "GARDER"
+            motif = "pas de probabilité aujourd'hui (score hors domaine ?)" if not np.isfinite(p) else ""
+        lignes.append({"ticker": t, "date d'achat": d0.date(), "action": action, "motif": motif,
+                       "proba": p, "séances détenues": k, "prix d'achat": info.get("prix", np.nan),
+                       "dernier cours": cours, "stop": stop})
+    cols_l = ["ticker", "date d'achat", "action", "motif", "proba", "séances détenues",
+              "prix d'achat", "dernier cours", "stop"]
+    lignes_df = pd.DataFrame(lignes, columns=cols_l)
+
+    # Lignes restantes par titre après les ventes, et séances depuis le dernier achat
+    reste = lignes_df[lignes_df["action"] == "GARDER"]
+    n_reste = reste.groupby("ticker").size()
+    depuis = reste.groupby("ticker")["séances détenues"].min()
+    vendus = set(lignes_df.loc[lignes_df["action"] == "VENDRE", "ticker"])
+    n_ventes = int((lignes_df["action"] == "VENDRE").sum())
+    places = max_positions - (len(lignes_df) - n_ventes)
+    n_achats = max(0, min(max_entrees_jour, places))
+
+    def eligible(t):
+        if t in vendus:
+            return False
+        n = int(n_reste.get(t, 0))
+        return n == 0 or (n < max_par_titre and int(depuis.get(t, 0)) >= ecart_min)
+
+    cand = jour[(jour["proba"] >= seuil_achat) & jour.index.map(eligible).astype(bool)]
+    achats = cand.sort_values("proba", ascending=False).head(n_achats).copy()
+    achats["ligne"] = [("2e ligne" if n_reste.get(t, 0) else "nouvelle") for t in achats.index]
+    a_garder = [c for c in ["ligne", "proba", "dernier cours", "stop", "signaux récents"]
+                if c in achats.columns]
+    achats = achats[a_garder]
+
+    print(f"\nPortefeuille : {len(lignes_df)} ligne(s), {n_ventes} à vendre, "
+          f"{places} place(s) libre(s) après ventes, {len(achats)} achat(s) proposé(s) "
+          f"(au plus {max_entrees_jour} par jour, {max_par_titre} lignes par titre, "
+          f"{ecart_min} séances d'écart).")
+    if len(cand) > len(achats):
+        print(f"  {len(cand) - len(achats)} autre(s) titre(s) au-dessus du seuil, non retenu(s) "
+              "faute de place ou au-delà du nombre d'achats par jour.")
+    lignes_df = lignes_df.set_index("ticker")
+    return {"vendre": lignes_df[lignes_df["action"] == "VENDRE"],
+            "garder": lignes_df[lignes_df["action"] == "GARDER"],
+            "acheter": achats, "toutes les probabilités": jour}
