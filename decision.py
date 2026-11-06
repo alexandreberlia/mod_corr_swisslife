@@ -436,6 +436,19 @@ def rapport_backtest(res: dict, out_dir: str = "backtest", titre: str = "") -> p
 # ---------------------------------------------------------------------------
 # Décisions du jour
 # ---------------------------------------------------------------------------
+def vers_score(pred: pd.DataFrame, col: str | None = None) -> pd.DataFrame:
+    """Met dans la colonne "proba" le score utilisé par les seuils, le backtest et les
+    décisions. Cible "direction" : la probabilité (rien à faire). Cible "return" : le
+    rendement prévu, par défaut la médiane q0.5 (ou "pred" sans quantiles) ; col="q0.1"
+    pour un critère prudent. Les seuils s'expriment alors en rendement (0.01 = +1 %)."""
+    if col is None and "proba" in pred.columns:
+        return pred
+    col = col or ("q0.5" if "q0.5" in pred.columns else "pred")
+    out = pred.copy()
+    out["proba"] = out[col]
+    return out
+
+
 def decisions_du_jour(model, data, window: int, seuil_achat: float,
                       seuil_vente: float | None = None, static=None,
                       horizon: int = 4, prices=None, entree: str = "ouverture",
@@ -476,9 +489,15 @@ def decisions_du_jour(model, data, window: int, seuil_achat: float,
                      "prepare_dataset.")
         raise ValueError("Aucune ligne disponible pour la prévision du jour : " + cause)
     ds = WindowDataset(data, "live", window=window, static=static)
-    pred = predict(model, DataLoader(ds, batch_size=512, shuffle=False), with_weights=True)
+    pred = vers_score(predict(model, DataLoader(ds, batch_size=512, shuffle=False),
+                              with_weights=True))
     derniere = pred.index.get_level_values("date").max()
-    jour = pred.xs(derniere, level="date").copy()
+    # Chaque titre : sa propre dernière donnée disponible (un titre sans cours du moment
+    # garde sa dernière clôture au lieu de disparaître)
+    der = pred.reset_index().sort_values("date").groupby("ticker").tail(1)
+    date_t = der.set_index("ticker")["date"]
+    jour = der.drop(columns="date").set_index("ticker").copy()
+    jour["date des données"] = date_t
     jour["décision"] = np.where(jour["proba"] >= seuil_achat, "ACHETER",
                                 np.where((seuil_vente is not None) & (jour["proba"] <= (seuil_vente or -1)),
                                          "VENDRE", "-"))
@@ -486,7 +505,8 @@ def decisions_du_jour(model, data, window: int, seuil_achat: float,
     # Signaux encore « frais » (franchissement dans les ~4 dernières séances)
     sig_cols = getattr(data, "signal_cols", []) or []
     if sig_cols:
-        fr = data.df.xs(derniere, level="date").reindex(jour.index)[sig_cols]
+        fr = data.df.loc[list(zip(date_t[jour.index], jour.index)), sig_cols]
+        fr.index = jour.index
         jour["signaux récents"] = fr.apply(
             lambda r: ", ".join(f"{c[4:]} ({v:.2f})" for c, v in r.items() if v >= 0.25) or "aucun",
             axis=1)
@@ -498,18 +518,25 @@ def decisions_du_jour(model, data, window: int, seuil_achat: float,
     extra = []
     if prices is not None:
         close = ohlc(prices)["Close"]
-        cours = close.loc[derniere].reindex(jour.index) if derniere in close.index else np.nan
+        cours = pd.Series([close[t].get(date_t[t], np.nan) if t in close.columns else np.nan
+                           for t in jour.index], index=jour.index)
         jour["dernier cours"] = cours
         extra.append("dernier cours")
         if stop_atr is not None:
             if atr is None:
                 atr = atr_wilder(ohlc(prices))
-            a = atr.loc[derniere].reindex(jour.index) if derniere in atr.index else np.nan
+            a = pd.Series([atr[t].get(date_t[t], np.nan) if t in atr.columns else np.nan
+                           for t in jour.index], index=jour.index)
             sens = np.where(jour["décision"] == "VENDRE", -1, 1)
             jour["stop"] = np.where(jour["décision"] != "-", cours - sens * stop_atr * a, np.nan)
             extra.append("stop")
-    cols = ["proba", "décision", "sortie prévue"] + extra \
+    cols = ["proba", "décision", "sortie prévue"] + extra + ["date des données"] \
         + (["signaux récents"] if sig_cols else []) + [c for c in jour.columns if c.startswith("ctx_")]
+    anciens = date_t[date_t < derniere]
+    if len(anciens):
+        print(f"Attention : {len(anciens)} titre(s) n'ont pas de donnée au {derniere.date()} et sont "
+              f"évalués sur leur dernière donnée disponible : {', '.join(map(str, anciens.index[:10]))}"
+              + (" ..." if len(anciens) > 10 else ""))
     out = jour[cols].sort_values("proba", ascending=False)
     out.attrs["date"] = derniere
     if entree == "cloture":
