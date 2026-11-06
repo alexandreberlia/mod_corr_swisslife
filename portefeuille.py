@@ -52,7 +52,7 @@ def backtest_portefeuille(pred: pd.DataFrame, prices, seuil_achat: float,
                           couts_bps: float = 10.0, entree: str = "cloture",
                           stop_atr: float | None = None, atr: pd.DataFrame | None = None,
                           stop_sur: str = "low", taille: str = "courant", capital: float = 1.0,
-                          **autres_options) -> dict:
+                          titres_entiers: bool = False, **autres_options) -> dict:
     """Rejoue la stratégie jour par jour sur la période couverte par `pred` (sortie de predict()).
 
     Sorties : signal (P <= seuil_sortie) et/ou stop. duree_max=None (défaut) = pas de
@@ -63,6 +63,10 @@ def backtest_portefeuille(pred: pd.DataFrame, prices, seuil_achat: float,
     `ecart_min` séances après la précédente sur ce titre. recroisement=True : la nouvelle
     ligne exige en plus que la proba soit repassée sous seuil_achat entre-temps (un
     « nouveau » signal, et pas le même qui dure).
+
+    titres_entiers=True : quantités arrondies à l'unité inférieure (le reste reste en cash).
+    Passez alors aussi votre vrai capital (capital=100_000) : avec capital=1, aucune
+    action n'est achetable.
 
     Positions encore ouvertes à la fin du backtest : valorisées au dernier cours, sans
     frais de vente, et listées dans les trades avec le motif « encore ouverte ».
@@ -121,10 +125,16 @@ def backtest_portefeuille(pred: pd.DataFrame, prices, seuil_achat: float,
         montant = min(montant, cash / (1 + c))
         if montant <= 1e-12 or not np.isfinite(px) or px <= 0:
             return
+        qty = montant / px
+        if titres_entiers:                       # arrondi à l'inférieur : jamais plus que le cash
+            qty = float(np.floor(qty))
+            if qty < 1:
+                return
+            montant = qty * px                   # montant réellement investi
         cash -= montant * (1 + c)
         frais_j[i] += montant * c
         stop = px - stop_atr * A[i_decision, j] if stop_atr is not None else np.nan
-        pos.setdefault(j, []).append({"qty": montant / px, "i_entree": i, "px": px, "stop": stop,
+        pos.setdefault(j, []).append({"qty": qty, "i_entree": i, "px": px, "stop": stop,
                                       "montant": montant * (1 + c), "proba": P[i_decision, j],
                                       "n": len(pos.get(j, [])) + 1})
         sous_seuil[j] = False
@@ -273,10 +283,12 @@ def choisir_seuils_portefeuille(pred_val: pd.DataFrame, prices, grille_achat=Non
     options : max_positions, max_entrees_jour, duree_max, couts_bps, entree, stop_atr, atr...
     """
     if grille_achat is None:
-        q = pred_val["proba"].quantile([0.7, 0.8, 0.9, 0.95]).round(3)
+        q = pred_val["proba"].quantile([0.7, 0.8, 0.9, 0.95]).round(4)
         grille_achat = sorted(set(q.tolist()))
     if grille_sortie is None:
-        grille_sortie = sorted({0.5, round(float(pred_val["proba"].median()), 3)})
+        est_proba = pred_val["proba"].between(0, 1).all()
+        neutre = 0.5 if est_proba else 0.0        # cible "return" : sortie si rendement prévu <= 0
+        grille_sortie = sorted({neutre, round(float(pred_val["proba"].median()), 4)})
     autre_sortie = options.get("stop_atr") is not None or options.get("duree_max") is not None
     sorties = [s for s in grille_sortie if s is not None]
     if autre_sortie:
