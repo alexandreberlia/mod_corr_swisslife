@@ -1,87 +1,133 @@
 """
-Tri rapide des signaux : lesquels apportent de l'information, avant d'entraîner le réseau.
+Scanner de TOUS les indicateurs produits par construire_panels (niveaux bruts, pas seulement
+les franchissements de seuils déclarés dans signaux.py).
 
-    from pertinence_signaux import pertinence
-    tab = pertinence(data)                    # data = prepare_dataset(..., **reglages)
-    print(tab.round(3).to_string())
+    from scanner_indicateurs import scanner
+    pan = construire_panels(prices, Indicateurs, ParamsPF(min_titres=1), generateur=features_completes)
+    res = scanner(pan, prices, horizon=22,
+                  train=("2005-01-01", "2016-12-31"), val=("2017-01-01", "2019-12-31"))
+    print(res["resume"].round(3).to_string())
 
-Trois mesures, calculées sur l'ENTRAÎNEMENT (et vérifiées sur la validation, jamais le test) :
-  1. Étude d'événement : après chaque déclenchement (fraîcheur = 1), la fréquence de hausse
-     à l'horizon est-elle différente de la fréquence normale ? (+ intervalle de confiance)
-  2. Logistique : coefficient du signal quand tous les signaux sont pris ensemble.
-  3. Ablation : hausse de la log-loss de validation quand on RETIRE ce signal du modèle
-     logistique (en millièmes ; > 0 = le signal aidait).
-Fonctionne avec target="direction" (hausse 0/1) ; avec "return", la cible est convertie en signe.
+Pour chaque indicateur (DataFrame dates x titres du dictionnaire `pan`) :
+  - IC : corrélation de rang (Spearman) entre l'indicateur du jour et le rendement des
+    `horizon` séances suivantes, calculée MOIS PAR MOIS (tous titres confondus), puis
+    moyennée. t-stat = IC moyen / écart-type * racine(nombre de mois).
+  - part des mois où l'IC a le signe moyen ;
+  - même IC sur la validation : le signe doit être le même ;
+  - fréquence de hausse par quintile (feuille « Quintiles ») : une relation monotone est bon signe,
+    une relation en U suggère un seuil plutôt qu'un niveau ;
+  - indicateurs redondants (corrélation de rang > 0,8 entre eux) : en garder un par groupe.
+Le TEST n'est jamais utilisé. Résultats écrits dans out_dir/scanner_indicateurs.xlsx.
 """
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score, log_loss
 
 
-def _wilson(k: float, n: float, z: float = 1.96) -> tuple[float, float]:
-    if n == 0:
-        return np.nan, np.nan
-    p = k / n
-    d = 1 + z ** 2 / n
-    c = (p + z ** 2 / (2 * n)) / d
-    h = z * np.sqrt(p * (1 - p) / n + z ** 2 / (4 * n ** 2)) / d
-    return c - h, c + h
+def _close(prices) -> pd.DataFrame:
+    if isinstance(prices, dict):
+        return pd.DataFrame({t: df["Close"] for t, df in prices.items()}).sort_index()
+    return prices
 
 
-def pertinence(data, cols: list[str] | None = None, min_declenchements: int = 200) -> pd.DataFrame:
-    df = data.df
-    cols = cols or list(getattr(data, "signal_cols", [])) or \
-        [c for c in data.feature_cols if c.startswith("sig_")]
-    if not cols:
-        raise ValueError("Aucune colonne de signal trouvée (signaux=True dans prepare_dataset ?).")
-    y_all = (df["target"] > 0).astype(float).where(df["target"].notna())
-    tr = (df["split"] == "train") & y_all.notna()
-    va = (df["split"] == "val") & y_all.notna()
-    base_tr, base_va = y_all[tr].mean(), y_all[va].mean()
+def _ic_mensuel(x: pd.Series, y: pd.Series) -> pd.Series:
+    d = pd.concat({"x": x, "y": y}, axis=1).dropna()
+    if d.empty:
+        return pd.Series(dtype=float)
+    mois = d.index.get_level_values("date").to_period("M")
+    return d.groupby(mois).apply(
+        lambda g: g["x"].corr(g["y"], method="spearman") if len(g) >= 20 else np.nan).dropna()
 
-    # 1. Étude d'événement (jour du déclenchement)
-    lignes = []
-    for c in cols:
-        ev_tr = tr & (df[c] >= 0.999)
-        ev_va = va & (df[c] >= 0.999)
-        n, k = int(ev_tr.sum()), float(y_all[ev_tr].sum())
-        lo, hi = _wilson(k, n)
-        f_va = y_all[ev_va].mean() if ev_va.any() else np.nan
-        lignes.append({"signal": c, "déclenchements (train)": n,
-                       "hausse après signal (train)": k / n if n else np.nan,
-                       "IC 95 % bas": lo, "IC 95 % haut": hi,
-                       "écart vs normale (train)": (k / n - base_tr) if n else np.nan,
-                       "écart vs normale (val)": f_va - base_va,
-                       "déclenchements (val)": int(ev_va.sum())})
-    tab = pd.DataFrame(lignes).set_index("signal")
-    tab["significatif"] = (tab["IC 95 % bas"] > base_tr) | (tab["IC 95 % haut"] < base_tr)
-    tab["même sens en val"] = np.sign(tab["écart vs normale (train)"]) == \
-        np.sign(tab["écart vs normale (val)"])
-    tab["assez fréquent"] = tab["déclenchements (train)"] >= min_declenchements
 
-    # 2. Logistique sur tous les signaux (fraîcheurs), 3. ablation sur la validation
-    X_tr, X_va = df.loc[tr, cols].fillna(0), df.loc[va, cols].fillna(0)
-    y_tr, y_va = y_all[tr], y_all[va]
-    lr = LogisticRegression(C=1.0, max_iter=2000).fit(X_tr, y_tr)
-    auc_ref = roc_auc_score(y_va, lr.predict_proba(X_va)[:, 1])
-    ll_ref = log_loss(y_va, lr.predict_proba(X_va)[:, 1])
-    tab["coef logistique"] = pd.Series(lr.coef_[0], index=cols)
-    perte = {}
-    for c in cols:
-        autres = [x for x in cols if x != c]
-        m = LogisticRegression(C=1.0, max_iter=2000).fit(X_tr[autres], y_tr)
-        perte[c] = 1000 * (log_loss(y_va, m.predict_proba(X_va[autres])[:, 1]) - ll_ref)
-    tab["perte val si retiré (‰ log-loss)"] = pd.Series(perte)
+def scanner(pan: dict, prices, horizon: int = 22, train=("2005-01-01", "2016-12-31"),
+            val=("2017-01-01", "2019-12-31"), exclure: tuple = (), seuil_redondance: float = 0.8,
+            out_dir: str | None = "scanner_indicateurs") -> dict:
+    close = _close(prices)
+    fwd = np.log(close.shift(-horizon) / close)                     # rendement futur (log)
+    fwd_long = fwd.stack().rename("fwd")
+    fwd_long.index.names = ["date", "ticker"]
 
-    print(f"Fréquence normale de hausse : train {base_tr:.3f} | val {base_va:.3f}")
-    print(f"AUC validation, logistique avec tous les signaux : {auc_ref:.3f}")
-    print("Lecture : un signal utile est assez fréquent, significatif sur le train, de même sens "
-          "en validation, et son retrait dégrade la validation (perte > 0).")
-    tab["utile"] = tab["assez fréquent"] & tab["significatif"] & tab["même sens en val"] & \
-        (tab["perte val si retiré (‰ log-loss)"] > 0)
-    return tab.sort_values(["utile", "écart vs normale (train)"], ascending=[False, False],
-                           key=lambda s: s.abs() if s.name != "utile" else s)
+    def periode(s, a, b):
+        dts = s.index.get_level_values("date")
+        return s[(dts >= pd.Timestamp(a)) & (dts <= pd.Timestamp(b))]
+
+    lignes, quint, series_tr = [], {}, {}
+    for nom, df in pan.items():
+        if nom in exclure or not isinstance(df, pd.DataFrame):
+            continue
+        df = df.reindex(columns=[c for c in df.columns if c in close.columns])
+        if df.empty:
+            continue
+        x = df.stack().rename(nom)
+        x.index.names = ["date", "ticker"]
+        x = x.replace([np.inf, -np.inf], np.nan)
+        if x.nunique() < 3:
+            continue
+        x_tr, y_tr = periode(x, *train), periode(fwd_long, *train)
+        x_va, y_va = periode(x, *val), periode(fwd_long, *val)
+        ic_tr, ic_va = _ic_mensuel(x_tr, y_tr), _ic_mensuel(x_va, y_va)
+        if len(ic_tr) < 12:
+            continue
+        m, s = ic_tr.mean(), ic_tr.std()
+        lignes.append({
+            "indicateur": nom,
+            "IC moyen (train)": m,
+            "t-stat (train)": m / s * np.sqrt(len(ic_tr)) if s > 0 else np.nan,
+            "mois de même signe (train)": float((np.sign(ic_tr) == np.sign(m)).mean()),
+            "IC moyen (val)": ic_va.mean() if len(ic_va) else np.nan,
+            "mois de même signe (val)": float((np.sign(ic_va) == np.sign(m)).mean()) if len(ic_va) else np.nan,
+            "observations (train)": int(pd.concat([x_tr, y_tr], axis=1).dropna().shape[0]),
+        })
+        # quintiles sur le train : fréquence de hausse et rendement moyen par quintile
+        d = pd.concat({"x": x_tr, "y": y_tr}, axis=1).dropna()
+        try:
+            q = pd.qcut(d["x"].rank(method="first"), 5, labels=["Q1 (bas)", "Q2", "Q3", "Q4", "Q5 (haut)"])
+            quint[nom] = d.groupby(q, observed=True)["y"].agg(
+                hausse=lambda v: (v > 0).mean(), rendement_moyen="mean")
+        except ValueError:
+            pass
+        series_tr[nom] = x_tr
+
+    if not lignes:
+        raise ValueError("Aucun indicateur exploitable : vérifiez que les colonnes de `pan` "
+                         "portent les mêmes noms de titres que `prices`.")
+    res = pd.DataFrame(lignes).set_index("indicateur")
+    res["même signe en val"] = np.sign(res["IC moyen (train)"]) == np.sign(res["IC moyen (val)"])
+    res["prometteur"] = (res["t-stat (train)"].abs() >= 2) & res["même signe en val"] & \
+        (res["mois de même signe (train)"] >= 0.55)
+    res = res.sort_values("t-stat (train)", key=lambda s: -s.abs())
+
+    # redondance (corrélation de rang entre indicateurs, sur un échantillon du train)
+    X = pd.concat(series_tr, axis=1)
+    if len(X) > 200_000:
+        X = X.sample(200_000, random_state=0)
+    corr = X.rank().corr()
+    paires = [(a, b, corr.loc[a, b]) for i, a in enumerate(corr.columns)
+              for b in corr.columns[i + 1:] if abs(corr.loc[a, b]) >= seuil_redondance]
+    redond = pd.DataFrame(paires, columns=["indicateur A", "indicateur B", "corrélation"]) \
+        .sort_values("corrélation", key=abs, ascending=False)
+
+    quintiles = pd.concat(quint, names=["indicateur", "quintile"]) if quint else pd.DataFrame()
+    out = {"resume": res, "quintiles": quintiles, "redondances": redond, "correlations": corr}
+
+    base = float((periode(fwd_long, *train) > 0).mean())
+    print(f"Fréquence normale de hausse à {horizon} séances (train) : {base:.3f}")
+    print(f"{int(res['prometteur'].sum())} indicateur(s) prometteur(s) sur {len(res)} "
+          "(|t| >= 2, même signe en validation, >= 55 % des mois du bon signe).")
+    if len(redond):
+        print(f"{len(redond)} paire(s) d'indicateurs redondants (|corr| >= {seuil_redondance}).")
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, "scanner_indicateurs.xlsx")
+        with pd.ExcelWriter(path, engine="openpyxl") as w:
+            res.to_excel(w, sheet_name="Résumé")
+            if len(quintiles):
+                quintiles.to_excel(w, sheet_name="Quintiles")
+            redond.to_excel(w, sheet_name="Redondances", index=False)
+            corr.to_excel(w, sheet_name="Corrélations")
+        print(f"Résultats : {os.path.abspath(path)}")
+    return out
