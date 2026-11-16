@@ -19,6 +19,10 @@ Utilisation :
   bilan("suivi", prices, horizon=22)                         # quand vous voulez
 
 Relancer enregistrer_jour le même jour remplace les lignes de ce jour (pas de doublon).
+Les journées s'enregistrent dans l'ordre du calendrier ; sauter des jours est permis.
+Une journée antérieure à la dernière enregistrée est refusée (rien n'est modifié).
+  restaurer("suivi", "2026-11-11")    # revenir à l'état de fin de journée du 11, pour rejouer la suite
+Chaque enregistrement copie d'abord l'état dans suivi/sauvegardes/ (30 dernières copies).
 """
 
 from __future__ import annotations
@@ -61,6 +65,37 @@ def _ajouter_csv(path, df, date):
     df.to_csv(path, sep=";", decimal=",", index=False)
 
 
+FICHIERS = ("etat.json", "portefeuille.json", "probas.csv", "ordres.csv", "trades.csv",
+            "valeur.csv", "positions.csv")
+
+
+def _sauvegarde(dossier: str, garder: int = 30) -> None:
+    """Copie l'état actuel dans dossier/sauvegardes/<horodatage>/ avant toute modification."""
+    import shutil
+    from datetime import datetime
+    racine = _p(dossier, "sauvegardes")
+    cible = os.path.join(racine, datetime.now().strftime("%Y-%m-%d_%H%M%S_%f"))
+    os.makedirs(cible, exist_ok=True)
+    for f in FICHIERS:
+        if os.path.exists(_p(dossier, f)):
+            shutil.copy2(_p(dossier, f), os.path.join(cible, f))
+    anciens = sorted(os.listdir(racine))[:-garder]
+    for a in anciens:
+        shutil.rmtree(os.path.join(racine, a), ignore_errors=True)
+
+
+def _dernier_jour(dossier: str, etat: dict) -> str | None:
+    """Dernière journée enregistrée (la plus récente dans le calendrier)."""
+    if etat.get("dernier_jour"):
+        return etat["dernier_jour"]
+    path = _p(dossier, "valeur.csv")
+    if os.path.exists(path):
+        v = pd.read_csv(path, sep=";", decimal=",")
+        if len(v):
+            return str(v["date"].max())
+    return None
+
+
 # ---------------------------------------------------------------------------
 def demarrer_strategie(dossier: str = "suivi", capital: float = 100_000.0,
                        date: str | None = None, portefeuille: dict | None = None) -> None:
@@ -85,7 +120,8 @@ def charger_portefeuille(dossier: str = "suivi") -> dict:
 # ---------------------------------------------------------------------------
 def enregistrer_jour(dossier: str, dec: dict, couts_bps: float = 10.0, max_positions: int = 10,
                      prix_executes: dict | None = None, non_executes: list | None = None,
-                     seuil_achat: float | None = None, seuil_sortie: float | None = None) -> dict:
+                     seuil_achat: float | None = None, seuil_sortie: float | None = None,
+                     forcer: bool = False, titres_entiers: bool = False) -> dict:
     """Enregistre la journée APRÈS le passage des ordres.
 
     dec           : sortie de decisions_portefeuille_du_jour
@@ -99,18 +135,66 @@ def enregistrer_jour(dossier: str, dec: dict, couts_bps: float = 10.0, max_posit
     # état de départ de la journée (permet de ré-enregistrer le même jour sans doublon)
     jour_df = dec["toutes les probabilités"]
     date = str(pd.Timestamp(jour_df.attrs.get("date", pd.Timestamp.today())).date())
-    hist = etat.setdefault("historique_etat", {})
-    if date in hist:                                           # déjà enregistré : on repart de l'avant
+    # Garde-fou : les décisions doivent porter sur la séance du jour (cours du moment)
+    if "date des données" in jour_df and not forcer:
+        aujourd_hui = pd.Timestamp.today().normalize()
+        vieux = jour_df.index[pd.to_datetime(jour_df["date des données"]) < aujourd_hui]
+        if len(vieux):
+            raise ValueError(
+                f"Rien n'a été enregistré : {len(vieux)} titre(s) sont évalués sur une séance "
+                f"antérieure à aujourd'hui ({', '.join(map(str, vieux[:8]))}), donc sur la clôture "
+                "de la veille et pas sur le cours du moment. Vérifiez que ces titres sont dans "
+                "cours_now et que la ligne du jour n'a pas de valeur manquante (volume, "
+                "indicateurs). Pour enregistrer quand même : forcer=True.")
+    dernier = _dernier_jour(dossier, etat)
+    hist = etat.get("historique_etat", {}) or {}
+    if dernier is not None and date < dernier:
+        raise ValueError(
+            f"Rien n'a été enregistré : la journée du {date} est antérieure à la dernière "
+            f"journée enregistrée ({dernier}). Les journées s'enregistrent dans l'ordre du "
+            "calendrier. Pour refaire l'historique à partir d'une date, revenez d'abord à "
+            "l'état de la veille : restaurer(dossier, 'AAAA-MM-JJ'), puis rejouez les jours "
+            "un par un. Vérifiez aussi DATE_DECISION.")
+    _sauvegarde(dossier)
+    if date == dernier and date in hist:                       # même jour relancé : on le remplace
         etat["liquidites"] = hist[date]["liquidites_avant"]
         port = hist[date]["portefeuille_avant"]
-    else:
+    elif date == dernier:                                      # même jour, sans état « avant » connu
+        raise ValueError(
+            f"Rien n'a été enregistré : la journée du {date} est déjà enregistrée et son état "
+            "de départ n'est plus disponible. Pour la refaire : restaurer(dossier, "
+            "'<journée précédente>') puis relancez.")
+    else:                                                      # nouvelle journée (jours sautés permis)
         port = charger_portefeuille(dossier)
-        hist[date] = {"liquidites_avant": etat["liquidites"], "portefeuille_avant": port}
+    # on ne garde que l'état « avant » de CETTE journée : jamais d'entrée périmée
+    etat["historique_etat"] = {date: {"liquidites_avant": etat["liquidites"],
+                                      "portefeuille_avant": json.loads(json.dumps(port))}}
+    etat["dernier_jour"] = date
     port = json.loads(json.dumps(port))                        # copie
     prix_executes, non_executes = prix_executes or {}, set(non_executes or [])
     c = couts_bps / 1e4
     cours = jour_df["dernier cours"] if "dernier cours" in jour_df else pd.Series(dtype=float)
     px = lambda t: float(prix_executes.get(t, cours.get(t, np.nan)))
+
+    # Valorisation : un titre détenu sans cours aujourd'hui garde son dernier cours connu
+    # (sinon sa valeur disparaîtrait du portefeuille)
+    dernier_connu: dict = {}
+    if os.path.exists(_p(dossier, "positions.csv")):
+        anc = pd.read_csv(_p(dossier, "positions.csv"), sep=";", decimal=",")
+        anc = anc[anc["date"] < date].dropna(subset=["cours du jour"])
+        if len(anc):
+            dernier_connu = anc.sort_values("date").groupby("ticker")["cours du jour"].last().to_dict()
+    sans_cours: set = set()
+
+    def px_val(t, ligne=None):
+        p = px(t)
+        if np.isfinite(p):
+            return p
+        sans_cours.add(t)
+        p = dernier_connu.get(t, np.nan)
+        if not np.isfinite(p) and ligne is not None:
+            p = float(ligne.get("prix", np.nan))                # à défaut : prix d'achat
+        return p
 
     def lignes(t):
         v = port.get(t, [])
@@ -153,8 +237,8 @@ def enregistrer_jour(dossier: str, dec: dict, couts_bps: float = 10.0, max_posit
 
     # 3. Valeur avant achats (pour la taille des lignes)
     def valeur():
-        inv = sum(float(l.get("quantite", 0)) * px(t) for t in port for l in lignes(t)
-                  if np.isfinite(px(t)))
+        inv = sum(float(l.get("quantite", 0)) * px_val(t, l) for t in port for l in lignes(t)
+                  if np.isfinite(px_val(t, l)))
         return etat["liquidites"] + inv, inv
     v_avant, _ = valeur()
 
@@ -168,6 +252,12 @@ def enregistrer_jour(dossier: str, dec: dict, couts_bps: float = 10.0, max_posit
             print(f"  {t} : achat non enregistré (prix inconnu ou plus de liquidités).")
             continue
         q = montant / p
+        if titres_entiers:                       # arrondi à l'inférieur : jamais plus que le cash
+            q = float(np.floor(q))
+            if q < 1:
+                print(f"  {t} : achat non enregistré (montant inférieur au prix d'une action).")
+                continue
+            montant = q * p
         etat["liquidites"] -= montant * (1 + c)
         port[t] = lignes(t) + [{"date": date, "prix": p, "quantite": q}]
         ordres.append({"date": date, "ticker": t, "sens": "ACHAT", "motif": row.get("ligne", ""),
@@ -184,7 +274,7 @@ def enregistrer_jour(dossier: str, dec: dict, couts_bps: float = 10.0, max_posit
     pos = []
     for t in port:
         for l in lignes(t):
-            q, pa, pc = float(l.get("quantite", np.nan)), float(l.get("prix", np.nan)), px(t)
+            q, pa, pc = float(l.get("quantite", np.nan)), float(l.get("prix", np.nan)), px_val(t, l)
             cout = q * pa * (1 + c)                         # prix payé, frais d'achat compris
             val = q * pc
             pos.append({"date": date, "ticker": t, "date d'achat": l["date"], "prix d'achat": pa,
@@ -200,9 +290,53 @@ def enregistrer_jour(dossier: str, dec: dict, couts_bps: float = 10.0, max_posit
         "performance depuis le début": v / etat["capital_initial"] - 1}]), date)
     _ecrire_json(_p(dossier, "portefeuille.json"), port)
     _ecrire_json(_p(dossier, "etat.json"), etat)
+    if sans_cours:
+        print(f"  Attention : pas de cours aujourd'hui pour {sorted(sans_cours)} ; valorisé(s) au "
+              "dernier cours connu. Vérifiez cours_now.")
+    if dernier is not None and date > dernier:
+        saut = len(pd.bdate_range(dernier, date)) - 2
+        if saut > 0:
+            print(f"  Note : {saut} jour(s) ouvré(s) sans enregistrement entre {dernier} et {date} "
+                  "(le portefeuille est repris tel quel).")
     print(f"Journée du {date} enregistrée : {sum(o['sens'] == 'ACHAT' for o in ordres)} achat(s), "
           f"{sum(o['sens'] == 'VENTE' for o in ordres)} vente(s), valeur {v:,.0f} "
           f"({v / etat['capital_initial'] - 1:+.2%} depuis le début).")
+    return port
+
+
+# ---------------------------------------------------------------------------
+def restaurer(dossier: str, date: str) -> dict:
+    """Revient à l'état de FIN de journée `date` (une journée déjà enregistrée) : portefeuille
+    et liquidités tels qu'ils étaient ce soir-là, et suppression de tout ce qui a été
+    enregistré après. Une sauvegarde est faite avant. Rejouez ensuite les jours suivants
+    dans l'ordre."""
+    date = str(pd.Timestamp(date).date())
+    lire = lambda n: pd.read_csv(_p(dossier, n), sep=";", decimal=",") \
+        if os.path.exists(_p(dossier, n)) else pd.DataFrame()
+    valeur, positions = lire("valeur.csv"), lire("positions.csv")
+    if not len(valeur) or date not in set(valeur["date"]):
+        connues = sorted(set(valeur["date"])) if len(valeur) else []
+        raise ValueError(f"Aucune journée enregistrée le {date}. Journées disponibles : "
+                         f"{connues[-15:]}")
+    _sauvegarde(dossier)
+    port: dict = {}
+    if len(positions):
+        for _, r in positions[positions["date"] == date].iterrows():
+            port.setdefault(r["ticker"], []).append(
+                {"date": str(r["date d'achat"]), "prix": float(r["prix d'achat"]),
+                 "quantite": float(r["quantité"])})
+    liquidites = float(valeur.loc[valeur["date"] == date, "liquidités"].iloc[-1])
+    for n in ("valeur.csv", "positions.csv", "ordres.csv", "trades.csv", "probas.csv"):
+        df = lire(n)
+        if len(df):
+            df[df["date"] <= date].to_csv(_p(dossier, n), sep=";", decimal=",", index=False)
+    etat = _lire_json(_p(dossier, "etat.json"), {})
+    etat.update({"liquidites": liquidites, "dernier_jour": date, "historique_etat": {}})
+    _ecrire_json(_p(dossier, "etat.json"), etat)
+    _ecrire_json(_p(dossier, "portefeuille.json"), port)
+    n_lignes = sum(len(v) for v in port.values())
+    print(f"État restauré à la fin du {date} : {n_lignes} ligne(s), liquidités {liquidites:,.0f}. "
+          "Tout ce qui avait été enregistré après a été retiré (copie dans sauvegardes/).")
     return port
 
 
@@ -219,7 +353,7 @@ def bilan(dossier: str, prices: dict | None = None, horizon: int | None = None,
     etat = _lire_json(_p(dossier, "etat.json"), {})
     # positions actuelles = photo du dernier jour enregistré
     if len(positions) and len(valeur):
-        derniere = valeur["date"].iloc[-1]
+        derniere = valeur["date"].max()
         pos_act = positions[positions["date"] == derniere].drop(columns="date")
     else:
         derniere, pos_act = None, pd.DataFrame()
@@ -232,7 +366,7 @@ def bilan(dossier: str, prices: dict | None = None, horizon: int | None = None,
               "capital initial": etat.get("capital_initial"),
               "liquidités (cash)": etat.get("liquidites"),
               "valeur des positions": pos_act["valeur"].sum() if len(pos_act) else 0.0,
-              "valeur actuelle": valeur["valeur"].iloc[-1] if len(valeur) else np.nan,
+              "valeur actuelle": valeur.sort_values("date")["valeur"].iloc[-1] if len(valeur) else np.nan,
               "P&L latent (positions ouvertes)": pnl_latent,
               "P&L réalisé (trades clôturés)": pnl_realise,
               "achats exécutés": int((ordres["sens"] == "ACHAT").sum()) if len(ordres) else 0,
