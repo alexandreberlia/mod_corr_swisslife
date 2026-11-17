@@ -7,7 +7,9 @@ Tout est rangé dans un dossier (par défaut "suivi/"), en fichiers lisibles dan
   probas.csv         probabilité de CHAQUE titre CHAQUE jour (pour mesurer l'AUC en réel)
   ordres.csv         achats et ventes exécutés (prix, quantité, frais, motif)
   trades.csv         trades clôturés (entrée, sortie, gain)
-  valeur.csv         valeur du portefeuille (cash + positions) à chaque jour enregistré
+  valeur.csv         valeur du portefeuille (cash + positions) à chaque jour enregistré,
+                     et celle de la référence équipondérée (même capital, tous les titres
+                     suivis à parts égales dès le 1er jour, conservés sans rééquilibrage)
   positions.csv      photo des positions chaque jour enregistré : cours, valeur, P&L latent
   bilan.xlsx         résumé : cash, positions et P&L, ordres, trades, AUC réelle
 
@@ -94,6 +96,50 @@ def _dernier_jour(dossier: str, etat: dict) -> str | None:
         if len(v):
             return str(v["date"].max())
     return None
+
+
+def _cours_historiques(dossier: str) -> pd.DataFrame:
+    """Cours de tous les titres suivis, jour par jour, tels qu'enregistrés dans probas.csv
+    (dates x titres), avec report du dernier cours connu."""
+    path = _p(dossier, "probas.csv")
+    if not os.path.exists(path):
+        return pd.DataFrame()
+    pr = pd.read_csv(path, sep=";", decimal=",")
+    if not len(pr) or "dernier cours" not in pr:
+        return pd.DataFrame()
+    return pr.pivot_table(index="date", columns="ticker", values="dernier cours",
+                          aggfunc="last").sort_index().ffill()
+
+
+def _init_reference(dossier: str, etat: dict, couts: float) -> dict | None:
+    """Référence = le capital de départ réparti à parts égales sur tous les titres suivis,
+    acheté le premier jour enregistré puis conservé sans rééquilibrage (frais d'achat
+    compris). Fixée une fois pour toutes dans etat.json."""
+    if etat.get("reference"):
+        return etat["reference"]
+    cours = _cours_historiques(dossier)
+    if not len(cours):
+        return None
+    d0 = cours.index.min()
+    p0 = cours.loc[d0].dropna()
+    p0 = p0[p0 > 0]
+    if not len(p0):
+        return None
+    part = etat["capital_initial"] / len(p0)
+    etat["reference"] = {"date": str(d0), "frais_bps": couts * 1e4,
+                         "quantites": {t: part * (1 - couts) / float(p) for t, p in p0.items()}}
+    return etat["reference"]
+
+
+def _valeur_reference(dossier: str, etat: dict, dates) -> pd.Series:
+    ref = etat.get("reference")
+    cours = _cours_historiques(dossier)
+    if not ref or not len(cours):
+        return pd.Series(np.nan, index=list(dates))
+    q = pd.Series(ref["quantites"])
+    cours = cours.reindex(columns=q.index)
+    val = (cours * q).sum(axis=1, min_count=1)
+    return val.reindex(list(dates)).ffill()
 
 
 # ---------------------------------------------------------------------------
@@ -284,10 +330,16 @@ def enregistrer_jour(dossier: str, dec: dict, couts_bps: float = 10.0, max_posit
     _ajouter_csv(_p(dossier, "positions.csv"), pd.DataFrame(pos, columns=[
         "date", "ticker", "date d'achat", "prix d'achat", "quantité", "cours du jour", "valeur",
         "coût (frais inclus)", "P&L latent", "P&L latent %", "poids dans le portefeuille"]), date)
+    _init_reference(dossier, etat, c)
+    v_ref = float(_valeur_reference(dossier, etat, [date]).iloc[0])
+    perf = v / etat["capital_initial"] - 1
+    perf_ref = v_ref / etat["capital_initial"] - 1 if np.isfinite(v_ref) else np.nan
     _ajouter_csv(_p(dossier, "valeur.csv"), pd.DataFrame([{
         "date": date, "liquidités": etat["liquidites"], "investi": inv, "valeur": v,
         "lignes": sum(len(lignes(t)) for t in port),
-        "performance depuis le début": v / etat["capital_initial"] - 1}]), date)
+        "performance depuis le début": perf,
+        "valeur référence": v_ref, "performance référence": perf_ref,
+        "écart vs référence": perf - perf_ref}]), date)
     _ecrire_json(_p(dossier, "portefeuille.json"), port)
     _ecrire_json(_p(dossier, "etat.json"), etat)
     if sans_cours:
@@ -300,7 +352,9 @@ def enregistrer_jour(dossier: str, dec: dict, couts_bps: float = 10.0, max_posit
                   "(le portefeuille est repris tel quel).")
     print(f"Journée du {date} enregistrée : {sum(o['sens'] == 'ACHAT' for o in ordres)} achat(s), "
           f"{sum(o['sens'] == 'VENTE' for o in ordres)} vente(s), valeur {v:,.0f} "
-          f"({v / etat['capital_initial'] - 1:+.2%} depuis le début).")
+          f"({perf:+.2%} depuis le début"
+          + (f" ; référence équipondérée {perf_ref:+.2%}, écart {perf - perf_ref:+.2%})."
+             if np.isfinite(perf_ref) else ")."))
     return port
 
 
@@ -351,6 +405,17 @@ def bilan(dossier: str, prices: dict | None = None, horizon: int | None = None,
                                                  lire("ordres.csv"), lire("probas.csv"),
                                                  lire("positions.csv"))
     etat = _lire_json(_p(dossier, "etat.json"), {})
+    if len(valeur) and etat:
+        if not etat.get("reference"):
+            frais = float(ordres["frais"].sum() / ordres["montant"].sum()) \
+                if len(ordres) and ordres["montant"].sum() > 0 else 0.0
+            if _init_reference(dossier, etat, frais):
+                _ecrire_json(_p(dossier, "etat.json"), etat)
+        valeur = valeur.sort_values("date").reset_index(drop=True)
+        vref = _valeur_reference(dossier, etat, valeur["date"]).to_numpy()
+        valeur["valeur référence"] = vref
+        valeur["performance référence"] = vref / etat["capital_initial"] - 1
+        valeur["écart vs référence"] = valeur["performance depuis le début"] - valeur["performance référence"]
     # positions actuelles = photo du dernier jour enregistré
     if len(positions) and len(valeur):
         derniere = valeur["date"].max()
@@ -378,6 +443,12 @@ def bilan(dossier: str, prices: dict | None = None, horizon: int | None = None,
               "frais payés": ordres["frais"].sum() if len(ordres) else 0.0}
     lignes["performance"] = lignes["valeur actuelle"] / lignes["capital initial"] - 1 \
         if lignes["capital initial"] else np.nan
+    if len(valeur) and "performance référence" in valeur:
+        ref = etat.get("reference") or {}
+        lignes["référence : équipondérée depuis le"] = ref.get("date")
+        lignes["référence : nombre de titres"] = len(ref.get("quantites", {}))
+        lignes["performance référence"] = valeur["performance référence"].iloc[-1]
+        lignes["écart vs référence"] = lignes["performance"] - lignes["performance référence"]
 
     if prices is not None and horizon and len(probas):
         from decision import ohlc
