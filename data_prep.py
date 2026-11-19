@@ -365,7 +365,7 @@ def prepare_dataset(prices,
                     indicator_field_level: int | None = None,
                     scale_target: bool = False,
                     signaux: list[dict] | bool | None = None,
-                    garder_niveaux: bool = False,
+                    garder_niveaux: bool | list = False,
                     demi_vie: float = 2.0,
                     max_jours: int = 10,
                     regime_col: str | None = None,
@@ -388,6 +388,8 @@ def prepare_dataset(prices,
                        franchissement, puis décroissante (demi_vie), 0 après max_jours.
       garder_niveaux : False (défaut) = les indicateurs bruts (RSI = 52...) sont retirés,
                        le modèle ne voit que les règles. True = il voit les deux.
+                       Liste, ex. ["dema_ecart", "mom_12_1"] = garde le niveau de CES
+                       indicateurs seulement (les autres restent uniquement en signaux).
 
     Score macro comme régime (contexte) plutôt que comme variable :
       regime_col     : nom de la colonne du score (ex. "score"). Toutes les colonnes macro
@@ -455,9 +457,11 @@ def prepare_dataset(prices,
             no_scale += signal_cols          # déjà entre 0 et 1 : pas de normalisation
             data = data.join(mem, how="left")
             if garder_niveaux:
-                data = data.join(ind, how="left")
+                data = data.join(ind[_niveaux_gardes(ind, garder_niveaux)], how="left")
         else:
-            data = data.join(ind, how="left")
+            garder = list(ind.columns) if garder_niveaux in (False, True, None) \
+                else _niveaux_gardes(ind, garder_niveaux)
+            data = data.join(ind[garder], how="left")
 
     regime_cols: list[str] = []
     if macro is not None:
@@ -523,6 +527,19 @@ def prepare_dataset(prices,
     tickers = sorted(data.index.get_level_values("ticker").unique())
     return PreparedData(df=data, feature_cols=feature_cols, scaler=scaler, tickers=tickers,
                         regime_cols=regime_cols, signal_cols=signal_cols)
+
+
+def _niveaux_gardes(ind: pd.DataFrame, garder_niveaux) -> list[str]:
+    """Colonnes d'indicateurs dont on garde le niveau : toutes (True) ou une liste."""
+    if garder_niveaux is True:
+        return list(ind.columns)
+    if isinstance(garder_niveaux, str):
+        garder_niveaux = [garder_niveaux]
+    absents = [c for c in garder_niveaux if c not in ind.columns]
+    if absents:
+        raise ValueError(f"garder_niveaux : {absents} absent(s) des indicateurs. "
+                         f"Indicateurs disponibles : {list(ind.columns)}")
+    return list(garder_niveaux)
 
 
 def _is_long(df) -> bool:
